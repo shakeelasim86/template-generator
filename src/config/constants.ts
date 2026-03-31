@@ -1,17 +1,16 @@
 export const APP_CONFIG = {
-  PORT: 3000,
-  USE_OPENAI: false,
-  OPENAI_MODEL: 'gpt-4.1-mini',
-  GEMINI_MODEL: 'gemini-2.5-flash',
-  DEBUG_PROMPTS: true,
+  PORT: Number(process.env.PORT) || 3000,
+  USE_OPENAI: process.env.USE_OPENAI === 'true',
+  OPENAI_MODEL: process.env.OPENAI_MODEL || 'gpt-4.1-mini',
+  GEMINI_MODEL: process.env.GEMINI_MODEL || 'gemini-2.5-flash',
+  DEBUG_PROMPTS: process.env.DEBUG_PROMPTS === 'true',
   KEYS: {
-    GEMINI_API_KEY: 'AIzaSyAv1cjuA4OSuxMHZaOaLjye2-bhXHcPTqA',
-    OPENAI_API_KEY:
-      'Key Here',
-    PEXELS_API_KEY: 'gn8qMqn2fAQIeEtLliNRHfFTJSixPdDjN4sD2P3GPSPLm7xtnGQGYVGp',
+    GEMINI_API_KEY: process.env.GEMINI_API_KEY || '',
+    OPENAI_API_KEY: process.env.OPENAI_API_KEY || '',
+    PEXELS_API_KEY: process.env.PEXELS_API_KEY || '',
   },
   ASSETS: {
-    LOGO_URL: '/assets/konvrt_logo.png',
+    LOGO_URL: process.env.LOGO_URL || '/assets/konvrt_logo.png',
   },
 } as const;
 
