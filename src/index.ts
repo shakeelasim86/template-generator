@@ -58,11 +58,20 @@ app.post('/api/generate', async (req, res) => {
         error: 'Generation is temporarily unavailable.',
         code: 'QUOTA_EXCEEDED',
         message:
-          "We use Google's Gemini API with the API key you provided. The free tier quota for this key is currently used up, so we can't generate templates right now. Free tier limits are per model and per day—try again later, or add billing in Google AI Studio for higher limits.",
+          "The Gemini API hit a rate or daily quota (free tier is often 20 requests/day per model). Wait and retry or add billing in Google AI Studio for higher limits.",
       });
       return;
     }
-    res.status(500).json({ error: rawMessage || 'Generation failed' });
+    const cause =
+      err instanceof Error && err.cause instanceof Error
+        ? err.cause.message
+        : err instanceof Error && typeof err.cause === 'string'
+          ? err.cause
+          : undefined;
+    res.status(500).json({
+      error: rawMessage || 'Generation failed',
+      ...(cause ? { detail: cause } : {}),
+    });
   }
 });
 
@@ -126,7 +135,36 @@ app.get('/api/generate/stream', async (req, res) => {
     close();
   } catch (err) {
     const rawMessage = err instanceof Error ? err.message : String(err);
-    res.write(`event: generation_error\ndata: ${JSON.stringify({ error: rawMessage || 'Generation failed' })}\n\n`);
+    const cause =
+      err instanceof Error && err.cause instanceof Error
+        ? err.cause.message
+        : err instanceof Error && typeof err.cause === 'string'
+          ? err.cause
+          : undefined;
+    const combined = [rawMessage, cause].filter(Boolean).join(' ');
+    const isQuota =
+      combined.includes('429') ||
+      combined.includes('RESOURCE_EXHAUSTED') ||
+      combined.includes('quota') ||
+      combined.includes('Quota exceeded');
+    if (isQuota) {
+      res.write(
+        `event: generation_error\ndata: ${JSON.stringify({
+          error: 'Generation is temporarily unavailable (API quota).',
+          code: 'QUOTA_EXCEEDED',
+          message:
+            'Gemini returned a rate or daily quota limit (free tier is limited per model per day). Wait and retry or enable billing in Google AI Studio.',
+          detail: rawMessage,
+        })}\n\n`,
+      );
+    } else {
+      res.write(
+        `event: generation_error\ndata: ${JSON.stringify({
+          error: rawMessage || 'Generation failed',
+          ...(cause ? { detail: cause } : {}),
+        })}\n\n`,
+      );
+    }
     close();
   }
 });

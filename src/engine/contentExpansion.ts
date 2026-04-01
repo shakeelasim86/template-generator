@@ -1,13 +1,8 @@
 /**
- * Step A: Content Expansion - LLM generates N unique Content Packages.
- *
- * Provider selection:
- * - If USE_OPENAI === 'true' and OPENAI_API_KEY is set -> use OpenAI
- * - Otherwise use Gemini with GEMINI_API_KEY.
+ * Step A: Content Expansion - LLM generates N unique Content Packages (Google Gemini).
  */
 
 import { GoogleGenAI } from '@google/genai';
-import OpenAI from 'openai';
 import type { ContentPackage, ElementConstraints, StockPhotoQueries } from '../types/schema.js';
 import { APP_CONFIG } from '../config/constants.js';
 
@@ -77,6 +72,9 @@ Brand context: niche="${niche}", category="${category}".${marketingGoal ? ` Mark
 Fixed brand (always use exactly — do not invent a different company name):
 - brandName: "${APP_CONFIG.BRAND.DISPLAY_NAME}" (exact spelling and casing)
 - email: "${APP_CONFIG.BRAND.CONTACT_EMAIL}" (exact copy)
+- website: "${APP_CONFIG.BRAND.WEBSITE_URL}" (exact copy for the canonical URL field only — not every design shows it on canvas)
+- showBrandLogoImage: boolean — true **only** if this pack assumes a pictorial LOGO **image** on the layout; false for typography-only brand treatment (use brandName in copy instead).
+- showWebsiteOnLayout: boolean — true **only** if copy or layout should visibly show the site URL (e.g. footer strip); if false, do not put "${APP_CONFIG.BRAND.WEBSITE_URL}" or konvrtai.com into headline, subhead, or body text.
 - Copy may describe the niche (e.g. pizza, coffee) but the trade name shown on templates is always ${APP_CONFIG.BRAND.DISPLAY_NAME}.
 
 Stock photography via Pexels (critical):
@@ -106,6 +104,9 @@ If real details are unknown, invent realistic placeholders:
 - phone: realistic phone number
 - address: realistic short street/city line
 - email must be exactly "${APP_CONFIG.BRAND.CONTACT_EMAIL}"
+- website must be exactly "${APP_CONFIG.BRAND.WEBSITE_URL}"
+- showBrandLogoImage: boolean (see rules above)
+- showWebsiteOnLayout: boolean (see rules above)
 
 Return a JSON object with:
 - brandName: must be exactly "${APP_CONFIG.BRAND.DISPLAY_NAME}"
@@ -113,6 +114,9 @@ Return a JSON object with:
 - productName: string (under 18 chars)
 - phone: string (e.g. "+1 (212) 555-0198")
 - email: must be exactly "${APP_CONFIG.BRAND.CONTACT_EMAIL}"
+- website: must be exactly "${APP_CONFIG.BRAND.WEBSITE_URL}"
+- showBrandLogoImage: boolean
+- showWebsiteOnLayout: boolean
 - address: string (e.g. "12 Grove St, New York")
 - name: short internal title for this variation (e.g. "Afternoon Ritual")
 - headline: string (short, punchy, under 40 chars)
@@ -124,112 +128,6 @@ Return a JSON object with:
 Output ONLY a valid JSON array of ${count} objects, no markdown or explanation. Example format:
 [{\"name\":\"...\",\"headline\":\"...\"},{\"name\":\"...\",...}]`;
 
-  const useOpenAI = APP_CONFIG.USE_OPENAI;
-
-  if (useOpenAI) {
-    const openAiKey = APP_CONFIG.KEYS.OPENAI_API_KEY;
-    if (!openAiKey) throw new Error('OPENAI_API_KEY is required when USE_OPENAI=true');
-
-    console.log('\n[openai] contentExpansion final prompt:\n' + prompt + '\n');
-
-    const client = new OpenAI({ apiKey: openAiKey });
-    const response: any = await client.responses.create({
-      model: APP_CONFIG.OPENAI_MODEL,
-      input: prompt,
-      max_output_tokens: Math.min(4000, Math.max(800, count * 600)),
-      text: {
-        format: {
-          type: 'json_schema',
-          name: 'content_packages',
-          strict: true,
-          schema: {
-            type: 'object',
-            additionalProperties: false,
-            required: ['items'],
-            properties: {
-              items: {
-                type: 'array',
-                minItems: count,
-                maxItems: count,
-                items: {
-                  type: 'object',
-                  additionalProperties: false,
-                  required: [
-                    'brandName',
-                    'menuTitle',
-                    'productName',
-                    'phone',
-                    'email',
-                    'address',
-                    'name',
-                    'headline',
-                    'subhead',
-                    'bodyText',
-                    'imageQueries',
-                    'stockPhotoQueries',
-                  ],
-                  properties: {
-                    brandName: { type: 'string', minLength: 3 },
-                    menuTitle: { type: 'string', minLength: 4 },
-                    productName: { type: 'string', minLength: 3 },
-                    phone: { type: 'string', minLength: 7 },
-                    email: { type: 'string', minLength: 6 },
-                    address: { type: 'string', minLength: 6 },
-                    name: { type: 'string' },
-                    headline: { type: 'string', minLength: 6 },
-                    subhead: { type: 'string', minLength: 8 },
-                    bodyText: { type: 'string', minLength: 8 },
-                    imageQueries: {
-                      type: 'array',
-                      minItems: 3,
-                      maxItems: 3,
-                      items: { type: 'string' },
-                    },
-                    stockPhotoQueries: {
-                      type: 'object',
-                      additionalProperties: false,
-                      required: [
-                        'fullBleedBackground',
-                        'framedFocus',
-                        'productDetail',
-                        'promo1',
-                        'promo2',
-                        'promo3',
-                      ],
-                      properties: {
-                        fullBleedBackground: { type: 'string', minLength: 4 },
-                        framedFocus: { type: 'string', minLength: 4 },
-                        productDetail: { type: 'string', minLength: 4 },
-                        promo1: { type: 'string', minLength: 4 },
-                        promo2: { type: 'string', minLength: 4 },
-                        promo3: { type: 'string', minLength: 4 },
-                      },
-                    },
-                  },
-                },
-              },
-            },
-          },
-        },
-      },
-    });
-
-    const text = extractOpenAIText(response) ?? '';
-    console.log('\n[openai] contentExpansion llm response:\n' + text + '\n');
-    const cleaned = repairJson(text.replace(/```json?\s*|\s*```/g, '').trim());
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(cleaned);
-    } catch {
-      throw new Error(`OpenAI returned invalid JSON: ${text.slice(0, 300)}`);
-    }
-
-    const obj = (parsed ?? {}) as Record<string, unknown>;
-    const items = Array.isArray(obj.items) ? obj.items : Array.isArray(parsed) ? (parsed as unknown[]) : [parsed];
-    return items.slice(0, count).map((it) => normalizeContentPackage(it, niche, category));
-  }
-
-  // Gemini path (default)
   const ai = new GoogleGenAI({ apiKey });
   const model = APP_CONFIG.GEMINI_MODEL;
   console.log('\n[gemini] contentExpansion final prompt:\n' + prompt + '\n');
@@ -299,7 +197,7 @@ CONTEXT
 Niche: "${niche}"
 Platform: "${platform}"
 Canvas: ${width}x${height}
-Variation Index: ${variationIndex}
+Variation Index: ${variationIndex} (this run must differ clearly from other indices: change composition, grid, image count, text placement, and archetype bias — do not repeat the same layout recipe as another variation)
 ${marketingGoal ? `Marketing Goal: "${marketingGoal}"\n` : ''}${opts?.brandName ? `Preferred Brand Name: "${opts.brandName}"\n` : ''}${opts?.visualStyle ? `Preferred Visual Style: "${opts.visualStyle}"\n` : ''}${opts?.tone ? `Preferred Tone: "${opts.tone}"\n` : ''}
 
 PHASE 1: DESIGN STRATEGY (INTERNAL RATIONALE)
@@ -329,31 +227,35 @@ Typography: Pick professional, legible typefaces that fit the archetype and nich
 Color Palette: Use variables ($VAR_BG, $VAR_PRIMARY, $VAR_ACCENT, $VAR_TEXT) to ensure dynamic behavior.
 Visual Weight: Balance a large image in one quadrant with text in the opposite quadrant.
 
-Rule: Every element MUST include content_placeholder (string). For text elements, it must be the exact label to render (including CTA/action labels).
+Rule: Every element MUST include content_placeholder (string) and textZone (boolean, false when not over a photo). For text elements, content_placeholder must be the exact label to render (including CTA/action labels).
+JSON output: every element's style object SHOULD include these keys when possible (color, fontFamily, fontSize, fontWeight, alignment, opacity, letterSpacing, backgroundColor, fill, stroke, strokeWidth, cornerRadius, borderRadius). Use "" or 0 for fields that do not apply (images may use all-zero / empty; shapes use fill/cornerRadius; text uses typography fields).
 
 TEXT CONSTRAINTS (required for every element where type is "text"):
 - Include "constraints": { "maxCharacters": number, "maxLines": number, "overflowHandling": "SHRINK_TO_FIT" | "CLIP" | "WRAP" } on each text node. Choose values from the actual box size and fontSize (tight labels: few chars, 1 line; headlines: moderate chars, 1–3 lines; body: more chars, WRAP or SHRINK_TO_FIT).
 - overflowHandling: use SHRINK_TO_FIT for display/headline tiers when the renderer should scale; WRAP for paragraph-like copy; CLIP only when overflow must be hard-clipped.
 - For type "image" or "shape", set "constraints": null.
 
-BRAND & CONTACT (fixed):
+BRAND & CONTACT:
 - brandName in "content" MUST be exactly "${APP_CONFIG.BRAND.DISPLAY_NAME}" (templates show this name).
 - email in "content" MUST be exactly "${APP_CONFIG.BRAND.CONTACT_EMAIL}".
-- design.logoText should be "${APP_CONFIG.BRAND.DISPLAY_NAME}" or a short uppercase variant of it.
-- A LOGO image element should use a text placeholder like "LOGO"; the app injects the real Konvrt logo asset.
+- website in "content" MUST always be exactly "${APP_CONFIG.BRAND.WEBSITE_URL}" (canonical field only).
+- content.showBrandLogoImage (boolean): set **true** only if you add a LOGO **image** element to "elements"; otherwise **false**. Many designs should use **BRAND_NAME** text only and **no** LOGO image — do not default to including a logo mark.
+- content.showWebsiteOnLayout (boolean): set **true** only if the visible design should show the URL (then use WEBSITE or {{website}} in that text element’s content_placeholder, or a short “Visit us” line). If **false**, do **not** place the URL or konvrtai.com in any visible copy.
+- design.logoText should be "${APP_CONFIG.BRAND.DISPLAY_NAME}" or a short uppercase variant of it (for metadata; optional on canvas unless you use a logo slot).
 
 IMAGERY — YOU CHOOSE THE COUNT (0 to many):
 - Decide how many **raster** photos the design needs: **zero** (type-led layout with shapes + color/gradient), **one** focal image, or **several** for split layouts / mosaics. More images is not always better; match the archetype.
-- Image roles: BACKGROUND_IMAGE (optional full-bleed behind UI), PRODUCT_IMAGE, PROMO_IMAGE_1 / _2 / _3, LOGO (asset). Omit image elements entirely if the layout is typography- or color-only; then set design.backgroundPreference to "color" or "gradient", not "image".
+- Image roles: BACKGROUND_IMAGE (optional full-bleed behind UI), PRODUCT_IMAGE, PROMO_IMAGE_1 / _2 / _3, LOGO (optional **only** when showBrandLogoImage is true). Omit LOGO entirely for minimal / type-only layouts.
 - For **each** non-LOGO image element, set content_placeholder to a **unique** short Pexels search phrase (no brand names). If you leave it empty, the app maps the role to optional content.stockPhotoQueries pools below.
+- For a LOGO image only when showBrandLogoImage is true: set content_placeholder to "LOGO"; the app injects the real asset.
 - Avoid duplicate roles only for LOGO and BACKGROUND_IMAGE (at most one each). You may use multiple PRODUCT_IMAGE or promo slots for grids.
 
-OPTIONAL STOCK POOL (Pexels-oriented phrases — for canvas / role fallback):
-- content.stockPhotoQueries may include any of: fullBleedBackground (wide soft scene for canvas fill), framedFocus, productDetail, promo1, promo2, promo3. Each phrase should differ when present; omitted entries are filled automatically.
+STOCK POOL (include every key in content.stockPhotoQueries; use distinct Pexels-style phrases or "" if unused):
+- content.stockPhotoQueries: fullBleedBackground, framedFocus, productDetail, promo1, promo2, promo3 — each a string (wide scene, hero, detail, three alternates). Empty string allowed for unused slots; keys must all be present.
 - content.imageQueries: 3 short phrases summarizing the niche/visual mood (still required).
 
 OUTPUT FORMAT
-Return ONLY a JSON object. No prose. Use a root-level "elements" array (OpenAI schema shape) with element_id, position, dimensions, style, content_placeholder, and constraints on every row (null for image/shape, full object for text).
+Return ONLY a JSON object. No prose. Use a root-level "elements" array with element_id, position, dimensions, style, content_placeholder, and constraints on every row (null for image/shape, full object for text).
 {
   "rationale": {
     "selected_archetype": "string",
@@ -391,11 +293,14 @@ Return ONLY a JSON object. No prose. Use a root-level "elements" array (OpenAI s
     ]
   },
   "content": {
-    "brandName": "string",
+    "brandName": "${APP_CONFIG.BRAND.DISPLAY_NAME}",
     "menuTitle": "string",
     "productName": "string",
     "phone": "string",
     "email": "string",
+    "website": "${APP_CONFIG.BRAND.WEBSITE_URL}",
+    "showBrandLogoImage": false,
+    "showWebsiteOnLayout": false,
     "address": "string",
     "name": "string",
     "headline": "string",
@@ -413,163 +318,6 @@ Return ONLY a JSON object. No prose. Use a root-level "elements" array (OpenAI s
   }
 }`;
 
-  const useOpenAI = APP_CONFIG.USE_OPENAI;
-  if (useOpenAI) {
-    const openAiKey = APP_CONFIG.KEYS.OPENAI_API_KEY;
-    if (!openAiKey) throw new Error('OPENAI_API_KEY is required when USE_OPENAI=true');
-    console.log('\n[openai] skeleton+content final prompt:\n' + prompt + '\n');
-
-    const client = new OpenAI({ apiKey: openAiKey });
-    const response: any = await client.responses.create({
-      model: APP_CONFIG.OPENAI_MODEL,
-      input: prompt,
-      max_output_tokens: 4000,
-      text: {
-        format: {
-          type: 'json_schema',
-          name: 'skeleton_with_content',
-          strict: true,
-          schema: {
-            type: 'object',
-            additionalProperties: false,
-            required: ['skeletonName', 'design', 'elements', 'content'],
-            properties: {
-              skeletonName: { type: 'string', minLength: 3 },
-              design: {
-                type: 'object',
-                additionalProperties: false,
-                required: ['designStyle', 'colorPalette', 'fontPairing', 'backgroundPreference', 'logoText'],
-                properties: {
-                  designStyle: { type: 'string', minLength: 3 },
-                  colorPalette: {
-                    type: 'object',
-                    additionalProperties: false,
-                    required: ['$VAR_BG_PRIMARY', '$VAR_BG_SECONDARY', '$VAR_PRIMARY', '$VAR_SECONDARY', '$VAR_ACCENT', '$VAR_TEXT_MAIN', '$VAR_TEXT_SECONDARY'],
-                    properties: {
-                      $VAR_BG_PRIMARY: { type: 'string', minLength: 4 },
-                      $VAR_BG_SECONDARY: { type: 'string', minLength: 4 },
-                      $VAR_PRIMARY: { type: 'string', minLength: 4 },
-                      $VAR_SECONDARY: { type: 'string', minLength: 4 },
-                      $VAR_ACCENT: { type: 'string', minLength: 4 },
-                      $VAR_TEXT_MAIN: { type: 'string', minLength: 4 },
-                      $VAR_TEXT_SECONDARY: { type: 'string', minLength: 4 },
-                    },
-                  },
-                  fontPairing: {
-                    type: 'object',
-                    additionalProperties: false,
-                    required: ['heading', 'body'],
-                    properties: {
-                      heading: { type: 'string', minLength: 2 },
-                      body: { type: 'string', minLength: 2 },
-                      accent: { type: 'string' },
-                    },
-                  },
-                  backgroundPreference: { type: 'string', enum: ['image', 'color', 'gradient'] },
-                  logoText: { type: 'string', minLength: 2 },
-                },
-              },
-              elements: {
-                type: 'array',
-                minItems: 4,
-                maxItems: 16,
-                items: {
-                  type: 'object',
-                  additionalProperties: false,
-                  required: ['element_id', 'type', 'role', 'position', 'dimensions', 'style', 'content_placeholder', 'constraints'],
-                  properties: {
-                    element_id: { type: 'string' },
-                    type: { type: 'string', enum: ['text', 'image', 'shape'] },
-                    role: {
-                      type: 'string',
-                      enum: ['BRAND_NAME', 'MENU_TITLE', 'PRODUCT_NAME', 'DESCRIPTION', 'HEADLINE', 'BODY_TEXT', 'PHONE_NUMBER', 'BACKGROUND_IMAGE', 'PRODUCT_IMAGE', 'PROMO_IMAGE_1', 'PROMO_IMAGE_2', 'PROMO_IMAGE_3', 'LOGO', 'DECORATIVE'],
-                    },
-                    position: {
-                      type: 'object',
-                      additionalProperties: false,
-                      required: ['x', 'y'],
-                      properties: { x: { type: 'number' }, y: { type: 'number' } },
-                    },
-                    dimensions: {
-                      type: 'object',
-                      additionalProperties: false,
-                      required: ['w', 'h'],
-                      properties: { w: { type: 'number' }, h: { type: 'number' } },
-                    },
-                    style: { type: 'object' },
-                    content_placeholder: { type: 'string' },
-                    constraints: {
-                      anyOf: [
-                        {
-                          type: 'object',
-                          additionalProperties: false,
-                          required: ['maxCharacters', 'maxLines', 'overflowHandling'],
-                          properties: {
-                            maxCharacters: { type: 'integer', minimum: 1, maximum: 500 },
-                            maxLines: { type: 'integer', minimum: 1, maximum: 30 },
-                            overflowHandling: { type: 'string', enum: ['SHRINK_TO_FIT', 'CLIP', 'WRAP'] },
-                          },
-                        },
-                        { type: 'null' },
-                      ],
-                    },
-                    textZone: { type: 'boolean' },
-                  },
-                },
-              },
-              content: {
-                type: 'object',
-                additionalProperties: false,
-                required: [
-                  'brandName',
-                  'menuTitle',
-                  'productName',
-                  'phone',
-                  'email',
-                  'address',
-                  'name',
-                  'headline',
-                  'subhead',
-                  'bodyText',
-                  'imageQueries',
-                ],
-                properties: {
-                  brandName: { type: 'string', minLength: 3 },
-                  menuTitle: { type: 'string', minLength: 4 },
-                  productName: { type: 'string', minLength: 3 },
-                  phone: { type: 'string', minLength: 7 },
-                  email: { type: 'string', minLength: 6 },
-                  address: { type: 'string', minLength: 6 },
-                  name: { type: 'string', minLength: 3 },
-                  headline: { type: 'string', minLength: 6 },
-                  subhead: { type: 'string', minLength: 8 },
-                  bodyText: { type: 'string', minLength: 8 },
-                  imageQueries: { type: 'array', minItems: 3, maxItems: 3, items: { type: 'string' } },
-                  stockPhotoQueries: {
-                    type: 'object',
-                    additionalProperties: false,
-                    properties: {
-                      fullBleedBackground: { type: 'string' },
-                      framedFocus: { type: 'string' },
-                      productDetail: { type: 'string' },
-                      promo1: { type: 'string' },
-                      promo2: { type: 'string' },
-                      promo3: { type: 'string' },
-                    },
-                  },
-                },
-              },
-            },
-          },
-        },
-      },
-    });
-    const text = extractOpenAIText(response) ?? '';
-    console.log('\n[openai] skeleton+content llm response:\n' + text + '\n');
-    const parsed = JSON.parse(repairJson(text.replace(/```json?\s*|\s*```/g, '').trim())) as Record<string, unknown>;
-    return normalizeSkeletonWithContent(parsed, niche, category, width, height);
-  }
-
   const ai = new GoogleGenAI({ apiKey });
   const model = APP_CONFIG.GEMINI_MODEL;
   console.log('\n[gemini] skeleton+content final prompt:\n' + prompt + '\n');
@@ -578,21 +326,6 @@ Return ONLY a JSON object. No prose. Use a root-level "elements" array (OpenAI s
   console.log('\n[gemini] skeleton+content llm response:\n' + text + '\n');
   const parsed = JSON.parse(repairJson(text.replace(/```json?\s*|\s*```/g, '').trim())) as Record<string, unknown>;
   return normalizeSkeletonWithContent(parsed, niche, category, width, height);
-}
-
-function extractOpenAIText(resp: any): string | undefined {
-  // Try new Responses API shape
-  const out = (resp && resp.output) || (resp && resp.output_text);
-  if (typeof out === 'string') return out;
-  if (Array.isArray(out) && out[0]?.content) {
-    const parts = out[0].content;
-    for (const p of parts) {
-      if (typeof p.text === 'string') return p.text;
-      if (p.type === 'output_text' && p.text) return p.text;
-      if (p.type === 'text' && p.text?.value) return p.text.value;
-    }
-  }
-  return undefined;
 }
 
 function buildDefaultStockPhotoQueries(
@@ -728,6 +461,9 @@ function normalizeContentPackage(raw: unknown, niche: string, category: string):
     productName: truncate(productName || niche.split(/\s+/)[0]?.toUpperCase() || 'SIGNATURE', 18),
     phone: phone || '+1 (212) 555-0198',
     email: APP_CONFIG.BRAND.CONTACT_EMAIL,
+    website: APP_CONFIG.BRAND.WEBSITE_URL,
+    showBrandLogoImage: o.showBrandLogoImage === true,
+    showWebsiteOnLayout: o.showWebsiteOnLayout === true,
     address: truncate(address || '12 Grove St, New York', 44),
     name: truncate(String(o.name ?? 'Untitled'), 32),
     headline: truncate(cleanText(o.headline) || 'A refined daily ritual', 42),
@@ -757,14 +493,56 @@ function normalizeSkeletonWithContent(
     : Array.isArray(designObj.elements)
       ? (designObj.elements as unknown[])
       : [];
+  const llmRoles: readonly LlmSkeletonElement['role'][] = [
+    'BRAND_NAME',
+    'MENU_TITLE',
+    'PRODUCT_NAME',
+    'DESCRIPTION',
+    'HEADLINE',
+    'BODY_TEXT',
+    'PHONE_NUMBER',
+    'BACKGROUND_IMAGE',
+    'PRODUCT_IMAGE',
+    'PROMO_IMAGE_1',
+    'PROMO_IMAGE_2',
+    'PROMO_IMAGE_3',
+    'LOGO',
+    'DECORATIVE',
+  ];
   const mapRole = (role: string): LlmSkeletonElement['role'] => {
-    const r = role.toUpperCase();
-    if (r === 'BODY') return 'BODY_TEXT';
-    if (r === 'SUBHEAD') return 'DESCRIPTION';
-    if (r === 'PRODUCT_IMAGE') return 'PRODUCT_IMAGE';
-    if (r === 'LOGO') return 'LOGO';
-    if (r === 'HEADLINE') return 'HEADLINE';
-    return 'DECORATIVE';
+    const r = String(role ?? 'DECORATIVE')
+      .trim()
+      .toUpperCase()
+      .replace(/\s+/g, '_')
+      .replace(/-/g, '_');
+    if (llmRoles.includes(r as LlmSkeletonElement['role'])) {
+      return r as LlmSkeletonElement['role'];
+    }
+    switch (r) {
+      case 'BODY':
+      case 'BODY_COPY':
+        return 'BODY_TEXT';
+      case 'SUBHEAD':
+      case 'SUB_HEAD':
+      case 'SUBTITLE':
+        return 'DESCRIPTION';
+      case 'TITLE':
+      case 'HEADING':
+        return 'HEADLINE';
+      case 'PHONE':
+      case 'PHONE_CTA':
+        return 'PHONE_NUMBER';
+      case 'HERO':
+      case 'HERO_IMAGE':
+        return 'PRODUCT_IMAGE';
+      case 'BG':
+      case 'BACKGROUND':
+        return 'BACKGROUND_IMAGE';
+      case 'CTA':
+        return 'BODY_TEXT';
+      default:
+        return 'DECORATIVE';
+    }
   };
   const elements: LlmSkeletonElement[] = rawElements
     .map((it, idx) => {
@@ -817,7 +595,21 @@ function normalizeSkeletonWithContent(
     })
     .filter(Boolean) as LlmSkeletonElement[];
 
-  const content = normalizeContentPackage((raw.content as unknown) ?? raw, niche, category);
+  let content = normalizeContentPackage((raw.content as unknown) ?? raw, niche, category);
+  const hasLogoImage = elements.some((e) => e.type === 'image' && e.role === 'LOGO');
+  const websiteCanon = APP_CONFIG.BRAND.WEBSITE_URL;
+  const skeletonWantsWebsite = elements.some((e) => {
+    if (e.type !== 'text') return false;
+    const ph = String(e.content_placeholder ?? '');
+    if (!ph.trim()) return false;
+    const u = ph.toUpperCase().replace(/\s+/g, '');
+    if (u === 'WEBSITE' || /\{\{\s*website\s*\}\}/i.test(ph)) return true;
+    if (websiteCanon && ph.includes(websiteCanon)) return true;
+    return /\bkonvrtai\.com\b/i.test(ph);
+  });
+  if (hasLogoImage) content = { ...content, showBrandLogoImage: true };
+  if (skeletonWantsWebsite) content = { ...content, showWebsiteOnLayout: true };
+
   const designRaw = ((raw.design as unknown) ?? {}) as Record<string, unknown>;
   const cpRaw = ((designRaw.colorPalette as unknown) ?? {}) as Record<string, unknown>;
   const cpRawAlt = ((designRaw.color_palette as unknown) ?? {}) as Record<string, unknown>;

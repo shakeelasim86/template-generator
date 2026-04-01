@@ -16,11 +16,7 @@ import type {
 import { resolveTemplateTaxonomy, buildTemplateIndexTags } from '../config/templateTaxonomy.js';
 import type { ResolvedTemplateTaxonomy } from '../config/templateTaxonomy.js';
 import type { ContentPackage } from '../types/schema.js';
-import {
-  generateContentPackages,
-  generateSkeletonAndContentPackage,
-  finalizeTextElementConstraints,
-} from './contentExpansion.js';
+import { generateSkeletonAndContentPackage, finalizeTextElementConstraints } from './contentExpansion.js';
 import {
   getContentForRole,
   getCanvasBackgroundStockQuery,
@@ -53,7 +49,18 @@ interface RuntimeSkeleton {
   }>;
 }
 
+/** Remove canonical brand URL from visible copy when the layout should not show a website line. */
+function stripCanonicalWebsiteFromVisibleText(text: string): string {
+  let s = String(text);
+  const url = APP_CONFIG.BRAND.WEBSITE_URL;
+  if (url) s = s.split(url).join('');
+  s = s.replace(/\bkonvrtai\.com\b/gi, '');
+  s = s.replace(/\s*\|\s*$/g, '').replace(/^\s*\|\s*/g, '');
+  return s.replace(/\s{2,}/g, ' ').trim();
+}
+
 function replaceTemplateTokens(text: string, pkg: ContentPackage): string {
+  const siteValue = pkg.showWebsiteOnLayout ? pkg.website : '';
   const trimmed = String(text ?? '').trim();
   const noDollar = trimmed.startsWith('$') ? trimmed.slice(1) : trimmed;
 
@@ -74,7 +81,7 @@ function replaceTemplateTokens(text: string, pkg: ContentPackage): string {
   if (noDollar.toUpperCase() === 'ADDRESS' || noDollar === 'address') return pkg.address;
   if (noDollar.toUpperCase() === 'LOGO_TEXT') return pkg.brandName;
   if (noDollar.toUpperCase() === 'HOURS') return 'Mon-Fri: 11 AM - 10 PM';
-  if (noDollar.toUpperCase() === 'WEBSITE') return pkg.email;
+  if (noDollar.toUpperCase() === 'WEBSITE' || noDollar === 'website') return siteValue;
 
   // Handle templating-style placeholders.
   return trimmed.replace(/\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/g, (_m, key: string) => {
@@ -90,6 +97,8 @@ function replaceTemplateTokens(text: string, pkg: ContentPackage): string {
         return pkg.phone;
       case 'email':
         return pkg.email;
+      case 'website':
+        return siteValue;
       case 'address':
         return pkg.address;
       case 'name':
@@ -206,26 +215,15 @@ export async function generateVariationsStream(
       skeleton = simplifySkeletonForElegance(skeleton);
       pkg = llm.content;
       llmDesign = llm.design;
-    } catch {
-      // Safe fallback if model output is malformed.
-      const skeletonFallback = createDynamicSkeleton({
-        width: canvasW,
-        height: canvasH,
-        platform,
-        seed: i + 1,
-        layoutIndex: i,
-      });
-      skeleton = simplifySkeletonForElegance(skeletonFallback);
-      const structureGoal = buildStructureGoal(marketing_goal, skeletonFallback);
-      const fallback = await generateContentPackages(
-        geminiKey,
-        niche,
-        category,
-        1,
-        structureGoal
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      console.error(
+        `[generateVariations] LLM skeleton+content failed for variation ${i + 1}/${count}: ${detail}`,
       );
-      pkg = fallback[0];
-      llmDesign = undefined;
+      throw new Error(
+        `LLM skeleton generation failed for variation ${i + 1}/${count}. Only live model output is used (no procedural fallback). ${detail}`,
+        { cause: err },
+      );
     }
 
     const template = await buildTemplateFromPackage(
@@ -239,7 +237,7 @@ export async function generateVariationsStream(
       { width: canvasW, height: canvasH, platform },
       llmDesign
     );
-    await onTemplate(template, i + 1, count);
+    await onTemplate({ ...template, skeleton_source: 'llm' }, i + 1, count);
   }
 }
 
@@ -313,18 +311,6 @@ function simplifySkeletonForElegance(skeleton: RuntimeSkeleton): RuntimeSkeleton
     ...skeleton,
     elements: kept.length >= 4 ? kept : skeleton.elements.slice(0, 6),
   };
-}
-
-function buildStructureGoal(marketingGoal: string | undefined, skeleton: RuntimeSkeleton): string {
-  const textRoles = Array.from(new Set(skeleton.elements.filter((e) => e.type === 'text').map((e) => e.role)));
-  const imageSlots = skeleton.elements.filter((e) => e.type === 'image').length;
-  const shapeSlots = skeleton.elements.filter((e) => e.type === 'shape').length;
-  const base = marketingGoal ? `${marketingGoal}. ` : '';
-  return (
-    `${base}Layout structure for this specific variation: ` +
-    `text roles=[${textRoles.join(', ')}], imageSlots=${imageSlots}, shapeSlots=${shapeSlots}. ` +
-    `Generate copy that fits this exact structure with strong visual hierarchy and non-empty field values.`
-  );
 }
 
 function getCanvasForPlatform(platform: NonNullable<GenerateVariationsInput['target_platform']>): { width: number; height: number } {
@@ -468,6 +454,10 @@ async function buildTemplateFromPackage(
   let stockImageSlot = 0;
 
   for (const el of skeleton.elements) {
+    if (el.role === 'LOGO' && !pkg.showBrandLogoImage) {
+      continue;
+    }
+
     const contentSlot = el.role;
     if (!contentSlots.includes(contentSlot)) contentSlots.push(contentSlot);
 
@@ -494,6 +484,9 @@ async function buildTemplateFromPackage(
       if (content) {
         // If the LLM used template placeholders like {{headline}}, replace them with real values.
         content = replaceTemplateTokens(content, pkg);
+        if (!pkg.showWebsiteOnLayout) {
+          content = stripCanonicalWebsiteFromVisibleText(content);
+        }
       }
     } else if (el.type === 'image') {
       if (el.role === 'LOGO') {
@@ -592,7 +585,10 @@ async function buildTemplateFromPackage(
       position: { x: el.position.x * sx, y: el.position.y * sy },
       dimensions:
         el.role === 'LOGO'
-          ? { w: 240, h: 120 }
+          ? {
+              w: APP_CONFIG.ASSETS.LOGO_TEMPLATE_WIDTH_PX,
+              h: APP_CONFIG.ASSETS.LOGO_TEMPLATE_HEIGHT_PX,
+            }
           : { w: el.dimensions.w * sx, h: el.dimensions.h * sy },
       rotation: 0,
       style: scaleStyle(style as TemplateElement['style'], sFont),
@@ -675,178 +671,6 @@ async function buildTemplateFromPackage(
     updated_at: now,
     elements: stabilizeElements(elements.sort((a, b) => (a.zIndex ?? 0) - (b.zIndex ?? 0)), canvas),
   };
-}
-
-function createDynamicSkeleton(args: {
-  width: number;
-  height: number;
-  platform: NonNullable<GenerateVariationsInput['target_platform']>;
-  seed: number;
-  layoutIndex: number;
-}): RuntimeSkeleton {
-  const { width: W, height: H, seed, platform, layoutIndex } = args;
-  const familyCount = 5;
-  const variantCount = 6;
-  const normalized = ((layoutIndex % (familyCount * variantCount)) + (familyCount * variantCount)) % (familyCount * variantCount);
-  const mode = normalized % familyCount;
-  const variant = Math.floor(normalized / familyCount);
-  const r = mulberry32(seed * 997 + W + H + normalized * 131);
-  const m = Math.round(Math.min(W, H) * 0.06);
-  const gap = Math.round(Math.min(W, H) * 0.018);
-
-  const base: RuntimeSkeleton = {
-    id: `runtime-${seed}-${mode}`,
-    name: `Runtime Layout ${mode + 1}`,
-    canvas: { width: W, height: H, colorPalette: {} },
-    elements: [],
-  };
-
-  if (mode === 0) {
-    // Hero image + bottom editorial band
-    base.elements.push(
-      { element_id: 'bg', type: 'image', role: 'BACKGROUND_IMAGE', position: { x: 0, y: 0 }, dimensions: { w: W, h: H }, style: {}, content: '' },
-      { element_id: 'band', type: 'shape', role: 'DECORATIVE', position: { x: m, y: Math.round(H * 0.62) }, dimensions: { w: W - 2 * m, h: Math.round(H * 0.3) }, style: { fill: 'rgba(0,0,0,0.58)', cornerRadius: 24 }, content: '', textZone: true },
-      { element_id: 'brand', type: 'text', role: 'BRAND_NAME', position: { x: m + 24, y: Math.round(H * 0.66) }, dimensions: { w: W - 2 * m - 48, h: 40 }, style: { color: '$VAR_ACCENT', fontFamily: 'Manrope, sans-serif', fontSize: 26, fontWeight: 700, alignment: 'left' }, content: '', textZone: true },
-      { element_id: 'title', type: 'text', role: 'MENU_TITLE', position: { x: m + 24, y: Math.round(H * 0.70) }, dimensions: { w: W - 2 * m - 48, h: 90 }, style: { color: '$VAR_TEXT_SECONDARY', fontFamily: 'Manrope, sans-serif', fontSize: 50, fontWeight: 700, alignment: 'left' }, content: '', textZone: true },
-      { element_id: 'desc', type: 'text', role: 'DESCRIPTION', position: { x: m + 24, y: Math.round(H * 0.78) }, dimensions: { w: W - 2 * m - 48, h: 90 }, style: { color: '$VAR_TEXT_SECONDARY', fontFamily: 'DM Sans, sans-serif', fontSize: 30, fontWeight: 500, alignment: 'left' }, content: '', textZone: true },
-    );
-    return applyLayoutVariant(base, variant, W, H, r);
-  }
-
-  if (mode === 1) {
-    // Left image / right copy split
-    const leftW = Math.round(W * 0.56);
-    base.elements.push(
-      { element_id: 'img', type: 'image', role: 'PRODUCT_IMAGE', position: { x: 0, y: 0 }, dimensions: { w: leftW, h: H }, style: {}, content: '' },
-      { element_id: 'panel', type: 'shape', role: 'DECORATIVE', position: { x: leftW - 2, y: 0 }, dimensions: { w: W - leftW + 2, h: H }, style: { fill: 'rgba(15,23,42,0.93)' }, content: '', textZone: true },
-      { element_id: 'brand', type: 'text', role: 'BRAND_NAME', position: { x: leftW + m / 2, y: m * 2 }, dimensions: { w: W - leftW - m, h: 40 }, style: { color: '$VAR_TEXT_SECONDARY', fontFamily: 'Manrope, sans-serif', fontSize: 24, fontWeight: 700, alignment: 'left' }, content: '', textZone: true },
-      { element_id: 'product', type: 'text', role: 'PRODUCT_NAME', position: { x: leftW + m / 2, y: m * 3.2 }, dimensions: { w: W - leftW - m, h: 140 }, style: { color: '$VAR_ACCENT', fontFamily: 'Fraunces, serif', fontSize: 74, fontWeight: 800, alignment: 'left' }, content: '', textZone: true },
-      { element_id: 'desc', type: 'text', role: 'DESCRIPTION', position: { x: leftW + m / 2, y: m * 6.1 }, dimensions: { w: W - leftW - m, h: 130 }, style: { color: '$VAR_TEXT_SECONDARY', fontFamily: 'DM Sans, sans-serif', fontSize: 28, fontWeight: 500, alignment: 'left' }, content: '', textZone: true },
-    );
-    return applyLayoutVariant(base, variant, W, H, r);
-  }
-
-  if (mode === 2) {
-    // Center poster type + framed image
-    const frameW = Math.round(W * 0.78);
-    const frameX = Math.round((W - frameW) / 2);
-    base.elements.push(
-      { element_id: 'bg', type: 'shape', role: 'DECORATIVE', position: { x: 0, y: 0 }, dimensions: { w: W, h: H }, style: { fill: '$VAR_BG_PRIMARY' }, content: '' },
-      { element_id: 'brand', type: 'text', role: 'BRAND_NAME', position: { x: m, y: m * 1.6 }, dimensions: { w: W - 2 * m, h: 40 }, style: { color: '$VAR_TEXT_SECONDARY', fontFamily: 'Manrope, sans-serif', fontSize: 24, fontWeight: 700, alignment: 'center' }, content: '', textZone: true },
-      { element_id: 'title', type: 'text', role: 'MENU_TITLE', position: { x: m, y: m * 2.5 }, dimensions: { w: W - 2 * m, h: 90 }, style: { color: '$VAR_TEXT_MAIN', fontFamily: 'Manrope, sans-serif', fontSize: 44, fontWeight: 700, alignment: 'center' }, content: '', textZone: true },
-      { element_id: 'img', type: 'image', role: 'PRODUCT_IMAGE', position: { x: frameX, y: Math.round(H * 0.25) }, dimensions: { w: frameW, h: Math.round(H * 0.5) }, style: {}, content: '' },
-      { element_id: 'product', type: 'text', role: 'PRODUCT_NAME', position: { x: m, y: Math.round(H * 0.78) }, dimensions: { w: W - 2 * m, h: 130 }, style: { color: '$VAR_ACCENT', fontFamily: 'Fraunces, serif', fontSize: 92, fontWeight: 800, alignment: 'center' }, content: '', textZone: true },
-    );
-    return applyLayoutVariant(base, variant, W, H, r);
-  }
-
-  if (mode === 3) {
-    // Triple image mosaic + footer copy
-    const topH = Math.round(H * 0.35);
-    const tileW = Math.round((W - 2 * m - 2 * gap) / 3);
-    base.elements.push(
-      { element_id: 'i1', type: 'image', role: 'PROMO_IMAGE_1', position: { x: m, y: m }, dimensions: { w: tileW, h: topH }, style: {}, content: '' },
-      { element_id: 'i2', type: 'image', role: 'PROMO_IMAGE_2', position: { x: m + tileW + gap, y: m }, dimensions: { w: tileW, h: topH }, style: {}, content: '' },
-      { element_id: 'i3', type: 'image', role: 'PROMO_IMAGE_3', position: { x: m + 2 * (tileW + gap), y: m }, dimensions: { w: tileW, h: topH }, style: {}, content: '' },
-      { element_id: 'hero', type: 'image', role: 'PRODUCT_IMAGE', position: { x: m, y: m + topH + gap }, dimensions: { w: W - 2 * m, h: Math.round(H * 0.34) }, style: {}, content: '' },
-      { element_id: 'foot', type: 'shape', role: 'DECORATIVE', position: { x: m, y: Math.round(H * 0.74) }, dimensions: { w: W - 2 * m, h: Math.round(H * 0.22) }, style: { fill: 'rgba(15,23,42,0.82)', cornerRadius: 20 }, content: '', textZone: true },
-      { element_id: 'headline', type: 'text', role: 'HEADLINE', position: { x: m + 20, y: Math.round(H * 0.77) }, dimensions: { w: W - 2 * m - 40, h: 90 }, style: { color: '$VAR_TEXT_SECONDARY', fontFamily: 'Fraunces, serif', fontSize: 56, fontWeight: 800, alignment: 'left' }, content: '', textZone: true },
-      { element_id: 'desc', type: 'text', role: 'DESCRIPTION', position: { x: m + 20, y: Math.round(H * 0.84) }, dimensions: { w: W - 2 * m - 40, h: 80 }, style: { color: '$VAR_TEXT_SECONDARY', fontFamily: 'DM Sans, sans-serif', fontSize: 28, fontWeight: 500, alignment: 'left' }, content: '', textZone: true },
-    );
-    return applyLayoutVariant(base, variant, W, H, r);
-  }
-
-  // mode === 4
-  // Clean minimal with big product type and offset image
-  const imgW = Math.round(W * 0.58);
-  base.elements.push(
-    { element_id: 'bg', type: 'shape', role: 'DECORATIVE', position: { x: 0, y: 0 }, dimensions: { w: W, h: H }, style: { fill: '$VAR_BG_PRIMARY' }, content: '' },
-    { element_id: 'accent', type: 'shape', role: 'DECORATIVE', position: { x: 0, y: Math.round(H * 0.58) }, dimensions: { w: W, h: Math.round(H * 0.42) }, style: { fill: 'rgba(255,217,61,0.11)' }, content: '' },
-    { element_id: 'img', type: 'image', role: 'PRODUCT_IMAGE', position: { x: W - imgW - m, y: Math.round(H * 0.12) }, dimensions: { w: imgW, h: Math.round(H * 0.56) }, style: {}, content: '' },
-    { element_id: 'brand', type: 'text', role: 'BRAND_NAME', position: { x: m, y: Math.round(H * 0.13) }, dimensions: { w: W - imgW - 2 * m, h: 40 }, style: { color: '$VAR_TEXT_SECONDARY', fontFamily: 'Manrope, sans-serif', fontSize: 24, fontWeight: 700, alignment: 'left' }, content: '', textZone: true },
-    { element_id: 'product', type: 'text', role: 'PRODUCT_NAME', position: { x: m, y: Math.round(H * 0.22) }, dimensions: { w: W - imgW - 2 * m, h: 220 }, style: { color: '$VAR_ACCENT', fontFamily: 'Fraunces, serif', fontSize: 102, fontWeight: 800, alignment: 'left' }, content: '', textZone: true },
-    { element_id: 'desc', type: 'text', role: 'DESCRIPTION', position: { x: m, y: Math.round(H * 0.48) }, dimensions: { w: W - imgW - 2 * m, h: 120 }, style: { color: '$VAR_TEXT_SECONDARY', fontFamily: 'DM Sans, sans-serif', fontSize: 30, fontWeight: 500, alignment: 'left' }, content: '', textZone: true },
-  );
-  return applyLayoutVariant(base, variant, W, H, r);
-}
-
-function mulberry32(a: number): () => number {
-  return function () {
-    let t = (a += 0x6d2b79f5);
-    t = Math.imul(t ^ (t >>> 15), t | 1);
-    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
-
-function buildUniqueLayoutPlan(count: number, seedKey: string): number[] {
-  const total = 30; // 5 families x 6 variants
-  const pool = Array.from({ length: total }, (_, i) => i);
-  const rand = mulberry32(hashString(seedKey));
-  for (let i = pool.length - 1; i > 0; i--) {
-    const j = Math.floor(rand() * (i + 1));
-    const tmp = pool[i];
-    pool[i] = pool[j];
-    pool[j] = tmp;
-  }
-  if (count <= total) return pool.slice(0, count);
-  const out: number[] = [];
-  for (let i = 0; i < count; i++) out.push(pool[i % total]);
-  return out;
-}
-
-function hashString(s: string): number {
-  let h = 2166136261;
-  for (let i = 0; i < s.length; i++) {
-    h ^= s.charCodeAt(i);
-    h = Math.imul(h, 16777619);
-  }
-  return h >>> 0;
-}
-
-function applyLayoutVariant(base: RuntimeSkeleton, variant: number, W: number, H: number, rand: () => number): RuntimeSkeleton {
-  if (variant === 0) return base;
-  const e = base.elements.map((x) => ({ ...x, position: { ...x.position }, dimensions: { ...x.dimensions }, style: { ...x.style } }));
-  const textEls = e.filter((x) => x.type === 'text');
-  const shapeEls = e.filter((x) => x.type === 'shape');
-  const imageEls = e.filter((x) => x.type === 'image');
-
-  if (variant === 1) {
-    // Horizontal mirror
-    for (const el of e) el.position.x = W - el.position.x - el.dimensions.w;
-    for (const t of textEls) if ((t.style as any).alignment === 'left') (t.style as any).alignment = 'right';
-  } else if (variant === 2) {
-    // Vertical rhythm shift
-    const dy = Math.round(H * 0.04);
-    for (let i = 0; i < textEls.length; i++) textEls[i].position.y += i % 2 === 0 ? -dy : dy;
-  } else if (variant === 3) {
-    // Centered editorial variant
-    for (const t of textEls) {
-      (t.style as any).alignment = 'center';
-      t.position.x = Math.max(24, Math.round(W * 0.08));
-      t.dimensions.w = Math.round(W * 0.84);
-    }
-  } else if (variant === 4) {
-    // Inset image blocks + rounder cards
-    const inset = Math.round(Math.min(W, H) * 0.03);
-    for (const im of imageEls) {
-      im.position.x += inset;
-      im.position.y += inset;
-      im.dimensions.w = Math.max(120, im.dimensions.w - inset * 2);
-      im.dimensions.h = Math.max(120, im.dimensions.h - inset * 2);
-    }
-    for (const sh of shapeEls) {
-      (sh.style as any).cornerRadius = Math.max(12, Number((sh.style as any).cornerRadius || 0) + 12);
-    }
-  } else if (variant === 5) {
-    // Subtle asymmetry
-    const dx = Math.round(W * (0.02 + rand() * 0.025));
-    for (let i = 0; i < textEls.length; i++) {
-      textEls[i].position.x += i % 2 === 0 ? dx : -dx;
-    }
-  }
-
-  return { ...base, elements: e };
 }
 
 function scaleStyle(style: TemplateElement['style'], sFont: number): TemplateElement['style'] {

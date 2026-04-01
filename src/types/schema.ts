@@ -130,6 +130,8 @@ export interface TemplateIndexing {
 
 export interface GeneratedTemplate {
   id: string;
+  /** Always `"llm"` for outputs from this service (procedural fallback removed). */
+  skeleton_source?: 'llm';
   name: string;
   category: string;
   subCategory: string;
@@ -193,6 +195,11 @@ export interface ContentPackage {
   productName: string;
   phone: string;
   email: string;
+  /** Public site URL (canonical); only shown on canvas when showWebsiteOnLayout is true. */
+  website: string;
+  /** When true, render LOGO layers and WEBSITE placeholders; when false, omit pictorial logo and hide URL on layout. */
+  showBrandLogoImage: boolean;
+  showWebsiteOnLayout: boolean;
   address: string;
   headline: string;
   subhead: string;
