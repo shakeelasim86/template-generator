@@ -10,7 +10,10 @@ import type {
   TemplateElement,
   ElementRole,
   Canvas,
+  TemplateMatchScope,
 } from '../types/schema.js';
+import { resolveTemplateTaxonomy, buildTemplateIndexTags } from '../config/templateTaxonomy.js';
+import type { ResolvedTemplateTaxonomy } from '../config/templateTaxonomy.js';
 import type { ContentPackage } from '../types/schema.js';
 import { generateContentPackages, generateSkeletonAndContentPackage } from './contentExpansion.js';
 import {
@@ -139,6 +142,9 @@ export async function generateVariationsStream(
   const platform = target_platform ?? 'instagram_post';
   const { width: canvasW, height: canvasH } = getCanvasForPlatform(platform);
 
+  const resolvedTaxonomy = resolveTemplateTaxonomy(category, niche);
+  const templateScope: TemplateMatchScope = input.template_scope === 'strict' ? 'strict' : 'universal';
+
   for (let i = 0; i < count; i++) {
     let skeleton: RuntimeSkeleton;
     let pkg: ContentPackage;
@@ -220,8 +226,8 @@ export async function generateVariationsStream(
     const template = await buildTemplateFromPackage(
       skeleton,
       pkg,
-      category,
-      niche,
+      resolvedTaxonomy,
+      templateScope,
       pexelsKey,
       brand_assets,
       i + 1,
@@ -265,7 +271,8 @@ function simplifySkeletonForElegance(skeleton: RuntimeSkeleton): RuntimeSkeleton
     'PHONE_NUMBER',
   ]);
   const textRolesSeen = new Set<ElementRole>();
-  const imageRolesSeen = new Set<ElementRole>();
+  /** Only one full-bleed layer and one brand mark; other image roles may repeat for mosaics. */
+  const primaryImageRolesSeen = new Set<ElementRole>();
   let decorativeCount = 0;
 
   const sorted = [...skeleton.elements].sort((a, b) => {
@@ -286,11 +293,15 @@ function simplifySkeletonForElegance(skeleton: RuntimeSkeleton): RuntimeSkeleton
       textRolesSeen.add(el.role);
     }
     if (el.type === 'image') {
-      if (imageRolesSeen.has(el.role)) continue;
-      imageRolesSeen.add(el.role);
+      if (el.role === 'LOGO' || el.role === 'BACKGROUND_IMAGE') {
+        if (primaryImageRolesSeen.has(el.role)) continue;
+        primaryImageRolesSeen.add(el.role);
+      }
+      const imageElCount = kept.filter((k) => k.type === 'image').length;
+      if (imageElCount >= 12) continue;
     }
     kept.push(el);
-    if (kept.length >= 9) break;
+    if (kept.length >= 14) break;
   }
 
   return {
@@ -340,8 +351,8 @@ function getImageOrientationForPlatform(
 async function buildTemplateFromPackage(
   skeleton: RuntimeSkeleton,
   pkg: ContentPackage,
-  category: string,
-  subCategory: string,
+  taxonomy: ResolvedTemplateTaxonomy,
+  matchScope: TemplateMatchScope,
   pexelsKey: string,
   brandAssets: GenerateVariationsInput['brand_assets'],
   index: number,
@@ -381,7 +392,9 @@ async function buildTemplateFromPackage(
 
   const usedPhotoIds = new Set<string>();
   const fetchDistinctPhotoUrl = async (query: string): Promise<string> => {
-    const q = String(query || '').trim() || `${subCategory || category} lifestyle`;
+    const q =
+      String(query || '').trim() ||
+      `${taxonomy.subCategoryLabel || taxonomy.categoryLabel} lifestyle`;
     const photo = await searchPhotoDeduped(pexelsKey, q, imageOrientation, usedPhotoIds);
     if (photo) {
       usedPhotoIds.add(String(photo.id));
@@ -414,7 +427,7 @@ async function buildTemplateFromPackage(
   }
 
   if (!canvasBgUrl && llmDesign?.backgroundPreference !== 'color') {
-    const fallbackQuery = `${subCategory || category} ${pkg.name || ''}`.trim();
+    const fallbackQuery = `${taxonomy.subCategoryLabel || taxonomy.categoryLabel} ${pkg.name || ''}`.trim();
     canvasBgUrl = await fetchDistinctPhotoUrl(fallbackQuery);
   }
 
@@ -446,6 +459,8 @@ async function buildTemplateFromPackage(
   const elements: TemplateElement[] = [];
   const contentSlots: ElementRole[] = [];
   let z = 0;
+  /** Advances when resolving Pexels query from role + stockPhotoQueries (not from placeholder). */
+  let stockImageSlot = 0;
 
   for (const el of skeleton.elements) {
     const contentSlot = el.role;
@@ -476,7 +491,14 @@ async function buildTemplateFromPackage(
       if (el.role === 'LOGO') {
         content = APP_CONFIG.ASSETS.LOGO_URL;
       } else {
-        const query = getStockPhotoQueryForRole(el.role, pkg);
+        const rawPh = String(el.content ?? '').trim();
+        const isHttp = /^https?:\/\//i.test(rawPh);
+        const isLogoWord = rawPh.toUpperCase() === 'LOGO';
+        const usePlaceholderQuery = Boolean(rawPh && !isHttp && !isLogoWord);
+        const query = usePlaceholderQuery
+          ? rawPh
+          : getStockPhotoQueryForRole(el.role, pkg, stockImageSlot);
+        if (!usePlaceholderQuery) stockImageSlot += 1;
         let url = await fetchDistinctPhotoUrl(query);
         if (!url && (el.role === 'BACKGROUND_IMAGE' || el.role === 'HERO_IMAGE' || el.role === 'PRODUCT_IMAGE')) {
           url = await fetchDistinctPhotoUrl(`${query} different angle`);
@@ -487,7 +509,7 @@ async function buildTemplateFromPackage(
 
     // Never emit null/empty image URLs; fall back to a stable placeholder.
     if (el.type === 'image' && (!content || String(content).trim() === '')) {
-      const seed = encodeURIComponent(`${subCategory}-${pkg.name}-${el.role}-${templateId}`);
+      const seed = encodeURIComponent(`${taxonomy.subCategoryId}-${pkg.name}-${el.role}-${templateId}`);
       const w = Math.max(200, Math.round((el.dimensions.w as number) * sx));
       const h = Math.max(200, Math.round((el.dimensions.h as number) * sy));
       content = `https://picsum.photos/seed/${seed}/${w}/${h}`;
@@ -508,9 +530,11 @@ async function buildTemplateFromPackage(
       const currentFamily = String((style as any).fontFamily || '').trim();
       if (!currentFamily) {
         const isDisplay = ['HEADLINE', 'MENU_TITLE', 'PRODUCT_NAME', 'BRAND_NAME'].includes(el.role);
-        (style as { fontFamily?: string }).fontFamily = isDisplay
-          ? `${llmDesign?.fontPairing.heading ?? 'Manrope'}, sans-serif`
-          : `${llmDesign?.fontPairing.body ?? 'DM Sans'}, sans-serif`;
+        const named = isDisplay ? llmDesign?.fontPairing.heading : llmDesign?.fontPairing.body;
+        const fallbackNamed = isDisplay ? 'Inter' : 'Inter';
+        const base = (named && String(named).trim()) || fallbackNamed;
+        const stack = base.includes(',') ? base : `${base.trim()}, sans-serif`;
+        (style as { fontFamily?: string }).fontFamily = stack;
       }
       (style as { fontSize: number }).fontSize = fontSize;
       (style as { fontWeight: number }).fontWeight = fontWeight;
@@ -572,11 +596,13 @@ async function buildTemplateFromPackage(
     });
   }
 
-  const tags = Array.from(
-    new Set(
-      `${category} ${subCategory} ${pkg.name}`.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean).slice(0, 12),
-    ),
-  );
+  const indexingDesignStyle = llmDesign?.designStyle || 'modern_social';
+  const tags = buildTemplateIndexTags({
+    resolved: taxonomy,
+    pkg,
+    designStyle: indexingDesignStyle,
+    targetPlatform: target.platform,
+  });
   const fontFamilies = Array.from(
     new Set(
       elements
@@ -603,18 +629,23 @@ async function buildTemplateFromPackage(
     fontFamilies: fontFamilies.length ? fontFamilies : ['Sans-serif'],
     totalElements: elements.length,
     targetPlatforms: [target.platform],
-    designStyle: llmDesign?.designStyle || 'modern_social',
+    designStyle: indexingDesignStyle,
     contentSlots,
-    industryFit: null,
+    industryFit: taxonomy.industryFit,
     marketingGoal: null,
     toneFit: null,
+    taxonomy: {
+      categoryId: taxonomy.categoryId,
+      subCategoryId: taxonomy.subCategoryId,
+    },
+    matchScope,
   };
 
   return {
     id: `TPL-${templateId}`,
     name,
-    category,
-    subCategory,
+    category: taxonomy.categoryLabel,
+    subCategory: taxonomy.subCategoryLabel,
     userOwnerId: null,
     canvas,
     indexing,
@@ -628,25 +659,10 @@ async function buildTemplateFromPackage(
     contentSlots,
     targetPlatforms: indexing.targetPlatforms,
     colorPalette,
-    industryFit: [
-      'RESTAURANT_FOOD',
-      'BEAUTY_COSMETICS',
-      'FASHION_APPAREL',
-      'FITNESS_WELLNESS',
-      'TECH_SOFTWARE',
-      'FINANCE_INSURANCE',
-      'REAL_ESTATE',
-      'EDUCATION_LEARNING',
-      'TRAVEL_HOSPITALITY',
-      'CONSULTING_B2B',
-      'E_COMMERCE_RETAIL',
-      'HEALTHCARE_MEDICAL',
-      'AUTOMOTIVE',
-      'ART_DESIGN',
-    ],
+    industryFit: taxonomy.industryFit,
     marketingGoal: null,
     toneFit: null,
-    scope: 'universal',
+    scope: matchScope,
     created_at: now,
     updated_at: now,
     elements: stabilizeElements(elements.sort((a, b) => (a.zIndex ?? 0) - (b.zIndex ?? 0)), canvas),

@@ -290,7 +290,6 @@ export async function generateSkeletonAndContentPackage(
     tone?: string;
   }
 ): Promise<LlmSkeletonWithContent> {
-  const allowedFonts = ['Manrope', 'DM Sans', 'Fraunces', 'Space Grotesk', 'Poppins', 'Montserrat', 'Playfair Display'];
   const gridUnit = Math.max(4, Math.round(Math.min(width, height) / 36));
   const prompt = `ROLE
 You are a Senior Art Director & Systems Designer. Your task is to architect a high-converting, Canva-quality template skeleton.
@@ -320,12 +319,12 @@ Pinterest: Maximize vertical scannability. Use large, high-contrast headline blo
 60-30-10 Rule: 60% Background, 30% Secondary/Shapes, 10% Accent/CTA.
 Typographic Scale: HEADLINE size must be at least 2.5x the BODY_TEXT size.
 The Grid: Snap all X/Y coordinates to a 12-column grid (multiples of ${gridUnit}px).
-The Visual Anchor: Every design needs one “Hero.” If it’s a PRODUCT_IMAGE, the text must support it, not fight it.
+The Visual Anchor: Strong focal point can be **photography**, **typography**, **color fields**, or **shapes** — not every layout needs a photo. If you use a PRODUCT_IMAGE or mosaic, text must support the hero, not fight it.
 Proximity & White Space: Group related items (Address + Phone) together. Maintain a “Safe Zone” of 10% of the canvas width on all edges.
 Typographic Scale Enforcement: Use a clear hierarchy. The HEADLINE must be at least 2.5x the size of the BODY_TEXT to create depth.
 
 PHASE 2: TECHNICAL SPECIFICATIONS
-Fonts: Only use: ${allowedFonts.join(', ')}.
+Typography: Pick professional, legible typefaces that fit the archetype and niche — you are not limited to a fixed list. Use well-known, production-ready families (e.g. Google Fonts, common web/system fonts). For each text element, set style.fontFamily as a real CSS font stack when possible (e.g. "Fraunces, serif" or "Outfit, sans-serif"). In design.fontPairing, name heading and body faces that match what you used in the skeleton. Pair a strong display face for headlines with a clear body face; avoid gimmicky or obscure names.
 Color Palette: Use variables ($VAR_BG, $VAR_PRIMARY, $VAR_ACCENT, $VAR_TEXT) to ensure dynamic behavior.
 Visual Weight: Balance a large image in one quadrant with text in the opposite quadrant.
 
@@ -337,13 +336,15 @@ BRAND & CONTACT (fixed):
 - design.logoText should be "${APP_CONFIG.BRAND.DISPLAY_NAME}" or a short uppercase variant of it.
 - A LOGO image element should use a text placeholder like "LOGO"; the app injects the real Konvrt logo asset.
 
-STOCK IMAGERY (Pexels search phrases — required, all distinct):
-- Include content.stockPhotoQueries with: fullBleedBackground, framedFocus, productDetail, promo1, promo2, promo3.
-- fullBleedBackground: wide atmospheric scene for the **full canvas** (blurred interior, venue depth).
-- framedFocus: **inset/main** hero (one dish/product) — wording MUST differ from fullBleedBackground.
-- productDetail: third distinct concept (macro texture, hands, ingredients).
-- promo1/2/3: three more **different** phrases for auxiliary/mosaic images.
-- Also keep content.imageQueries as 3 short phrases (may summarize the above).
+IMAGERY — YOU CHOOSE THE COUNT (0 to many):
+- Decide how many **raster** photos the design needs: **zero** (type-led layout with shapes + color/gradient), **one** focal image, or **several** for split layouts / mosaics. More images is not always better; match the archetype.
+- Image roles: BACKGROUND_IMAGE (optional full-bleed behind UI), PRODUCT_IMAGE, PROMO_IMAGE_1 / _2 / _3, LOGO (asset). Omit image elements entirely if the layout is typography- or color-only; then set design.backgroundPreference to "color" or "gradient", not "image".
+- For **each** non-LOGO image element, set content_placeholder to a **unique** short Pexels search phrase (no brand names). If you leave it empty, the app maps the role to optional content.stockPhotoQueries pools below.
+- Avoid duplicate roles only for LOGO and BACKGROUND_IMAGE (at most one each). You may use multiple PRODUCT_IMAGE or promo slots for grids.
+
+OPTIONAL STOCK POOL (Pexels-oriented phrases — for canvas / role fallback):
+- content.stockPhotoQueries may include any of: fullBleedBackground (wide soft scene for canvas fill), framedFocus, productDetail, promo1, promo2, promo3. Each phrase should differ when present; omitted entries are filled automatically.
+- content.imageQueries: 3 short phrases summarizing the niche/visual mood (still required).
 
 OUTPUT FORMAT
 Return ONLY a JSON object. No prose.
@@ -395,12 +396,12 @@ Return ONLY a JSON object. No prose.
     "bodyText": "string",
     "imageQueries": ["string", "string", "string"],
     "stockPhotoQueries": {
-      "fullBleedBackground": "string",
-      "framedFocus": "string",
-      "productDetail": "string",
-      "promo1": "string",
-      "promo2": "string",
-      "promo3": "string"
+      "fullBleedBackground": "string (optional)",
+      "framedFocus": "string (optional)",
+      "productDetail": "string (optional)",
+      "promo1": "string (optional)",
+      "promo2": "string (optional)",
+      "promo3": "string (optional)"
     }
   }
 }`;
@@ -464,7 +465,7 @@ Return ONLY a JSON object. No prose.
               elements: {
                 type: 'array',
                 minItems: 4,
-                maxItems: 10,
+                maxItems: 16,
                 items: {
                   type: 'object',
                   additionalProperties: false,
@@ -510,7 +511,6 @@ Return ONLY a JSON object. No prose.
                   'subhead',
                   'bodyText',
                   'imageQueries',
-                  'stockPhotoQueries',
                 ],
                 properties: {
                   brandName: { type: 'string', minLength: 3 },
@@ -527,21 +527,13 @@ Return ONLY a JSON object. No prose.
                   stockPhotoQueries: {
                     type: 'object',
                     additionalProperties: false,
-                    required: [
-                      'fullBleedBackground',
-                      'framedFocus',
-                      'productDetail',
-                      'promo1',
-                      'promo2',
-                      'promo3',
-                    ],
                     properties: {
-                      fullBleedBackground: { type: 'string', minLength: 4 },
-                      framedFocus: { type: 'string', minLength: 4 },
-                      productDetail: { type: 'string', minLength: 4 },
-                      promo1: { type: 'string', minLength: 4 },
-                      promo2: { type: 'string', minLength: 4 },
-                      promo3: { type: 'string', minLength: 4 },
+                      fullBleedBackground: { type: 'string' },
+                      framedFocus: { type: 'string' },
+                      productDetail: { type: 'string' },
+                      promo1: { type: 'string' },
+                      promo2: { type: 'string' },
+                      promo3: { type: 'string' },
                     },
                   },
                 },
@@ -765,8 +757,8 @@ function normalizeSkeletonWithContent(
       $VAR_TEXT_SECONDARY: String(cpRaw.$VAR_TEXT_SECONDARY ?? cpRawAlt.$VAR_TEXT_SECONDARY ?? '#FFFFFF'),
     },
     fontPairing: {
-      heading: cleanText(fpRaw.heading) || 'Manrope',
-      body: cleanText(fpRaw.body) || 'DM Sans',
+      heading: cleanText(fpRaw.heading) || 'Inter',
+      body: cleanText(fpRaw.body) || 'Inter',
       accent: cleanText(fpRaw.accent) || undefined,
     },
     backgroundPreference: ['image', 'color', 'gradient'].includes(String(designRaw.backgroundPreference))
@@ -793,7 +785,7 @@ function normalizeSkeletonWithContent(
         role: 'HEADLINE',
         position: { x: 60, y: 80 },
         dimensions: { w: width - 120, h: 120 },
-        style: { fontFamily: 'Manrope, sans-serif', fontSize: 56, fontWeight: 700, color: '$VAR_TEXT_SECONDARY', alignment: 'left' },
+        style: { fontFamily: 'Inter, sans-serif', fontSize: 56, fontWeight: 700, color: '$VAR_TEXT_SECONDARY', alignment: 'left' },
         textZone: true,
       },
     ],

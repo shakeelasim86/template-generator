@@ -29,6 +29,9 @@ app.post('/api/generate', async (req, res) => {
       res.status(400).json({ error: 'niche is required' });
       return;
     }
+    const template_scope =
+      body.template_scope === 'strict' || body.template_scope === 'universal' ? body.template_scope : undefined;
+
     const input: GenerateVariationsInput = {
       niche,
       category,
@@ -38,6 +41,7 @@ app.post('/api/generate', async (req, res) => {
       brand_name: body.brand_name,
       visual_style: body.visual_style,
       tone: body.tone,
+      template_scope,
       brand_assets: body.brand_assets,
     };
     const templates = await generateVariations(input);
@@ -96,6 +100,11 @@ app.get('/api/generate/stream', async (req, res) => {
       return;
     }
 
+    const template_scope =
+      req.query.template_scope === 'strict' || req.query.template_scope === 'universal'
+        ? (req.query.template_scope as GenerateVariationsInput['template_scope'])
+        : undefined;
+
     const input: GenerateVariationsInput = {
       niche,
       category,
@@ -105,6 +114,7 @@ app.get('/api/generate/stream', async (req, res) => {
       brand_name: typeof req.query.brand_name === 'string' ? req.query.brand_name : undefined,
       visual_style: typeof req.query.visual_style === 'string' ? req.query.visual_style : undefined,
       tone: typeof req.query.tone === 'string' ? req.query.tone : undefined,
+      template_scope,
     };
 
     await generateVariationsStream(input, (template, index, total) => {

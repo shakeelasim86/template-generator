@@ -100,6 +100,9 @@ export interface Canvas {
   colorPalette: ColorPalette;
 }
 
+/** How strictly a template should match posts: category-only vs category+subcategory. */
+export type TemplateMatchScope = 'universal' | 'strict';
+
 export interface TemplateIndexing {
   isPro: boolean;
   status: 'active' | 'inactive';
@@ -113,6 +116,16 @@ export interface TemplateIndexing {
   industryFit: string[] | null;
   marketingGoal: string | null;
   toneFit: string | null;
+  /** Canonical ids — align with `src/config/templateTaxonomy.ts` */
+  taxonomy: {
+    categoryId: string;
+    subCategoryId: string;
+  };
+  /**
+   * universal: usable for any post in the same taxonomy category (subcategory may differ).
+   * strict: only for posts whose category and subcategory both match this template.
+   */
+  matchScope: TemplateMatchScope;
 }
 
 export interface GeneratedTemplate {
@@ -137,7 +150,7 @@ export interface GeneratedTemplate {
   industryFit: string[];
   marketingGoal: string | null;
   toneFit: string | null;
-  scope: 'universal';
+  scope: TemplateMatchScope;
   created_at: string;
   updated_at: string;
 }
@@ -151,6 +164,11 @@ export interface GenerateVariationsInput {
   brand_name?: string;
   visual_style?: string;
   tone?: string;
+  /**
+   * universal (default): match posts on category only.
+   * strict: post must match both category and subcategory (e.g. poll- or format-specific layouts).
+   */
+  template_scope?: TemplateMatchScope;
   brand_assets?: {
     logo_url?: string;
     colors?: { primary?: string; accent?: string };
