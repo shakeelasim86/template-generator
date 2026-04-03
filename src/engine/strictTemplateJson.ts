@@ -43,6 +43,18 @@ function resolveColorValue(val: unknown, pal: Record<string, string>): string {
   return s;
 }
 
+/** Replace longest $VAR_* keys first so nested names do not partially match. */
+function substitutePaletteTokensInString(s: string, pal: Record<string, string>): string {
+  let out = s;
+  const keys = Object.keys(pal).filter((k) => k.startsWith('$')).sort((a, b) => b.length - a.length);
+  for (const k of keys) {
+    const v = pal[k];
+    if (!v) continue;
+    out = out.split(k).join(v);
+  }
+  return out;
+}
+
 function exportFontWeight(fw: unknown): string {
   if (fw === undefined || fw === null) return 'normal';
   if (typeof fw === 'string') {
@@ -115,19 +127,43 @@ function canvasToStrict(canvas: Canvas | undefined, pal: Record<string, string>)
   const h = typeof c?.height === 'number' ? c.height : 1350;
   const unit = c?.unit === 'px' ? 'px' : 'px';
   const bg = c?.background;
-  // Wire format: never a full-canvas background image (photos live on PRODUCT_IMAGE etc. only).
-  let value = resolveColorValue(pal.$VAR_BG_PRIMARY, pal) || '#1a1a1a';
-  if (bg?.type === 'color' || bg?.type === 'gradient') {
+  const palOut = paletteRecordForExport(pal);
+
+  const fallbackColor = resolveColorValue(pal.$VAR_BG_PRIMARY, pal) || '#1a1a1a';
+
+  if (bg?.type === 'image' && typeof bg.value === 'string' && bg.value.trim()) {
+    const raw = bg.value.trim();
+    const resolved = /^https?:\/\//i.test(raw) ? raw : resolveColorValue(raw, pal);
+    if (/^https?:\/\//i.test(resolved)) {
+      if (!palOut.$VAR_BG_PRIMARY) palOut.$VAR_BG_PRIMARY = fallbackColor;
+      return {
+        width: w,
+        height: h,
+        unit,
+        background: { type: 'image', value: resolved },
+        color_palette: palOut,
+      };
+    }
+  }
+
+  if (bg?.type === 'gradient' && typeof bg.value === 'string' && bg.value.trim()) {
+    const value = substitutePaletteTokensInString(String(bg.value), pal);
+    if (!palOut.$VAR_BG_PRIMARY) palOut.$VAR_BG_PRIMARY = fallbackColor;
+    return {
+      width: w,
+      height: h,
+      unit,
+      background: { type: 'gradient', value },
+      color_palette: palOut,
+    };
+  }
+
+  let value = fallbackColor;
+  if (bg?.type === 'color' && typeof bg.value === 'string' && bg.value.trim()) {
     value = resolveColorValue(bg.value, pal) || value;
-  } else if (bg?.type === 'image' && typeof bg.value === 'string' && bg.value.trim()) {
-    value = resolveColorValue(pal.$VAR_BG_PRIMARY, pal) || value;
   }
   const background: { type: 'color'; value: string } = { type: 'color', value };
-
-  const palOut = paletteRecordForExport(pal);
-  if (!palOut.$VAR_BG_PRIMARY && background.value) {
-    palOut.$VAR_BG_PRIMARY = background.value;
-  }
+  if (!palOut.$VAR_BG_PRIMARY) palOut.$VAR_BG_PRIMARY = background.value;
 
   return {
     width: w,
@@ -155,16 +191,34 @@ function filterRedundantFullBleedShapes(elements: TemplateElement[], cw: number,
   return elements.filter((e) => !isRedundantFullCanvasDecorative(e, cw, ch));
 }
 
-/** Main app paints in array order; put text first, then shapes, then images so raster layers come last. */
-function sortElementsForMainApp(elements: TemplateElement[]): TemplateElement[] {
+/** Raster tier for main-app array order (lower tier = earlier in JSON = painted before layers that follow). */
+function imageRoleOrderTier(role: string): 0 | 1 | 2 {
+  const r = String(role || '').toUpperCase();
+  if (r === 'BACKGROUND_IMAGE') return 2;
+  if (r === 'LOGO') return 1;
+  return 0;
+}
+
+/**
+ * Main app paints in array order (first → back, last → front).
+ * Images: PRODUCT / promos / other rasters → LOGO → BACKGROUND_IMAGE (always last).
+ */
+export function sortElementsForMainApp(elements: TemplateElement[]): TemplateElement[] {
   const texts = elements.filter((e) => e.type === 'text');
   const shapes = elements.filter((e) => e.type === 'shape');
   const images = elements.filter((e) => e.type === 'image');
   const byZ = (a: TemplateElement, b: TemplateElement) => (a.zIndex ?? 0) - (b.zIndex ?? 0);
   texts.sort(byZ);
   shapes.sort(byZ);
-  images.sort(byZ);
-  return [...texts, ...shapes, ...images];
+
+  const tier0 = images.filter((e) => imageRoleOrderTier(String(e.role)) === 0);
+  const tier1 = images.filter((e) => imageRoleOrderTier(String(e.role)) === 1);
+  const tier2 = images.filter((e) => imageRoleOrderTier(String(e.role)) === 2);
+  tier0.sort(byZ);
+  tier1.sort(byZ);
+  tier2.sort(byZ);
+
+  return [...texts, ...shapes, ...tier0, ...tier1, ...tier2];
 }
 
 function textElementToExport(el: TemplateElement, pal: Record<string, string>): Record<string, unknown> {

@@ -22,6 +22,7 @@ import { searchPhotoDeduped, getImageUrl } from './imageService.js';
 import { LIGHT_TEXT, DARK_TEXT } from './colorExtraction.js';
 import { randomUUID } from 'crypto';
 import { APP_CONFIG } from '../config/constants.js';
+import { sortElementsForMainApp } from './strictTemplateJson.js';
 interface RuntimeSkeleton {
   id: string;
   name: string;
@@ -265,7 +266,9 @@ function simplifySkeletonForElegance(skeleton: RuntimeSkeleton): RuntimeSkeleton
     'PHONE_NUMBER',
   ]);
   const textRolesSeen = new Set<ElementRole>();
-  /** Only one full-bleed layer and one brand mark; other image roles may repeat for mosaics. */
+  /** Only one full-bleed BACKGROUND_IMAGE in elements (canvas photo is merged at build time). */
+  let backgroundImageKept = false;
+  /** Only one brand mark; other image roles may repeat for mosaics. */
   const primaryImageRolesSeen = new Set<ElementRole>();
   let decorativeCount = 0;
 
@@ -287,7 +290,10 @@ function simplifySkeletonForElegance(skeleton: RuntimeSkeleton): RuntimeSkeleton
       textRolesSeen.add(el.role);
     }
     if (el.type === 'image') {
-      if (el.role === 'BACKGROUND_IMAGE') continue;
+      if (el.role === 'BACKGROUND_IMAGE') {
+        if (backgroundImageKept) continue;
+        backgroundImageKept = true;
+      }
       if (el.role === 'LOGO') {
         if (primaryImageRolesSeen.has(el.role)) continue;
         primaryImageRolesSeen.add(el.role);
@@ -386,7 +392,6 @@ async function buildTemplateFromPackage(
     return '';
   };
 
-  // Canvas uses solid color only (no full-bleed background photo on template JSON).
   if (!primaryHex) primaryHex = '#FFFFFF';
   if (!accentHex) accentHex = '#FF6B6B';
 
@@ -400,11 +405,36 @@ async function buildTemplateFromPackage(
     $VAR_TEXT_SECONDARY: llmDesign?.colorPalette.$VAR_TEXT_SECONDARY ?? textSecondaryHex,
   };
 
+  const bgPref = llmDesign?.backgroundPreference ?? 'color';
+  // Canvas is only solid color or gradient (LLM palette). Full-bleed photos are BACKGROUND_IMAGE elements.
+  const canvasBackground: NonNullable<Canvas['background']> =
+    bgPref === 'gradient'
+      ? {
+          type: 'gradient',
+          value: `linear-gradient(135deg, ${colorPalette.$VAR_BG_PRIMARY} 0%, ${colorPalette.$VAR_BG_SECONDARY} 100%)`,
+        }
+      : { type: 'color', value: colorPalette.$VAR_BG_PRIMARY ?? bgPrimaryHex };
+
+  const hasBgImageLayer = skeleton.elements.some((e) => e.type === 'image' && e.role === 'BACKGROUND_IMAGE');
+  const needsInjectedBg = bgPref === 'image' && !hasBgImageLayer;
+  const injectedFullBleed: RuntimeSkeleton['elements'][number] = {
+    element_id: 'full-bleed-bg',
+    type: 'image',
+    role: 'BACKGROUND_IMAGE',
+    position: { x: 0, y: 0 },
+    dimensions: { w: baseW, h: baseH },
+    style: {},
+    zIndex: 0,
+    content: '',
+    textZone: false,
+  };
+  const sourceElements = needsInjectedBg ? [injectedFullBleed, ...skeleton.elements] : skeleton.elements;
+
   const canvas: Canvas = {
     width: target.width,
     height: target.height,
     unit: 'px',
-    background: { type: 'color', value: colorPalette.$VAR_BG_PRIMARY ?? bgPrimaryHex },
+    background: canvasBackground,
     colorPalette,
   };
 
@@ -414,10 +444,7 @@ async function buildTemplateFromPackage(
   /** Advances when resolving Pexels query from role + stockPhotoQueries (not from placeholder). */
   let stockImageSlot = 0;
 
-  for (const el of skeleton.elements) {
-    if (el.type === 'image' && el.role === 'BACKGROUND_IMAGE') {
-      continue;
-    }
+  for (const el of sourceElements) {
     if (el.type === 'shape' && el.role === 'DECORATIVE') {
       const bw = skeleton.canvas.width;
       const bh = skeleton.canvas.height;
@@ -546,25 +573,33 @@ async function buildTemplateFromPackage(
       });
     }
 
+    const isFullBleedBg = el.type === 'image' && el.role === 'BACKGROUND_IMAGE';
+
     elements.push({
       elementId: `${templateId}-${el.element_id}`,
       type: el.type,
       role: el.role,
-      position: { x: el.position.x * sx, y: el.position.y * sy },
+      position: isFullBleedBg ? { x: 0, y: 0 } : { x: el.position.x * sx, y: el.position.y * sy },
       dimensions:
         el.role === 'LOGO'
           ? {
               w: APP_CONFIG.ASSETS.LOGO_TEMPLATE_WIDTH_PX,
               h: APP_CONFIG.ASSETS.LOGO_TEMPLATE_HEIGHT_PX,
             }
-          : { w: el.dimensions.w * sx, h: el.dimensions.h * sy },
+          : isFullBleedBg
+            ? { w: canvas.width, h: canvas.height }
+            : { w: el.dimensions.w * sx, h: el.dimensions.h * sy },
       rotation: 0,
       style: scaleStyle(style as TemplateElement['style'], sFont),
       content,
       constraints: templateConstraints,
       assetReferenceId: '',
       crop: null,
-      zIndex: typeof el.zIndex === 'number' && Number.isFinite(el.zIndex) ? el.zIndex : z++,
+      zIndex: isFullBleedBg
+        ? 0
+        : typeof el.zIndex === 'number' && Number.isFinite(el.zIndex)
+          ? el.zIndex
+          : z++,
     });
   }
 
@@ -637,7 +672,7 @@ async function buildTemplateFromPackage(
     scope: matchScope,
     created_at: now,
     updated_at: now,
-    elements: stabilizeElements(normalizeStackingOrder(elements), canvas),
+    elements: stabilizeElements(sortElementsForMainApp(normalizeStackingOrder(elements)), canvas),
   };
 }
 
@@ -716,6 +751,15 @@ function stabilizeElements(elements: TemplateElement[], canvas: Canvas): Templat
   const minSide = Math.min(canvas.width, canvas.height);
   const pad = Math.round(minSide * 0.02);
   return elements.map((el) => {
+    if (el.type === 'image' && el.role === 'BACKGROUND_IMAGE') {
+      return {
+        ...el,
+        position: { x: 0, y: 0 },
+        dimensions: { w: canvas.width, h: canvas.height },
+        style: { ...(el.style || {}) },
+      };
+    }
+
     const out = {
       ...el,
       position: { ...el.position },

@@ -210,17 +210,19 @@ Pinterest: Maximize vertical scannability. Use large, high-contrast headline blo
 
 3. Design Heuristics:
 60-30-10 Rule: 60% Background, 30% Secondary/Shapes, 10% Accent/CTA.
-Typographic Scale: HEADLINE size must be at least 2.5x the BODY_TEXT size.
+Typographic Scale: HEADLINE size must be at least 2.5x the BODY_TEXT size (when BODY_TEXT exists).
 The Grid: Snap all X/Y coordinates to a 12-column grid (multiples of ${gridUnit}px).
 The Visual Anchor: Strong focal point can be **photography**, **typography**, **color fields**, or **shapes** — not every layout needs a photo. If you use a PRODUCT_IMAGE or mosaic, text must support the hero, not fight it.
-Proximity & White Space: Group related items (Address + Phone) together. Maintain a “Safe Zone” of 10% of the canvas width on all edges.
-Typographic Scale Enforcement: Use a clear hierarchy. The HEADLINE must be at least 2.5x the size of the BODY_TEXT to create depth.
+Simplicity & elegance: Prefer **fewer, stronger** layers over busy layouts. Do **not** pack logo, brand name, full address, phone, and CTA on every design—include only what fits the concept (e.g. headline + hero product + one CTA is valid; add phone or BRAND_NAME only when it aids the promo).
+Proximity & White Space: When you use address/phone, group them; otherwise omit. Maintain a “Safe Zone” of 10% of the canvas width on all edges.
+Typographic Scale Enforcement: Use a clear hierarchy. When BODY_TEXT is present, HEADLINE must be at least 2.5x its size.
 
 PHASE 2: TECHNICAL SPECIFICATIONS
 Typography: Pick professional, legible typefaces that fit the archetype and niche — you are not limited to a fixed list. Use well-known, production-ready families (e.g. Google Fonts, common web/system fonts). For each text element, set style.fontFamily as a real CSS font stack when possible (e.g. "Fraunces, serif" or "Outfit, sans-serif"). In design.fontPairing, name heading and body faces that match what you used in the skeleton. Pair a strong display face for headlines with a clear body face; avoid gimmicky or obscure names.
 Color Palette: Use ONLY these tokens in design.color_palette and in element style.color / style.fill / style.stroke (never use short names like $VAR_BG or $VAR_TEXT): $VAR_BG_PRIMARY, $VAR_BG_SECONDARY, $VAR_PRIMARY, $VAR_SECONDARY, $VAR_ACCENT, $VAR_TEXT_MAIN, $VAR_TEXT_SECONDARY.
-Canvas fill: $VAR_BG_PRIMARY is the solid canvas background the user sees behind everything. Pick a cohesive hex that matches the niche and archetype (bakery/wellness → warm creams or soft sage; nightlife/sport → deep jewel or electric accents; PROFESSIONAL/CLEAN may use cool neutrals). Avoid using the same dark blue–slate for every template unless the brief or archetype calls for it; ensure text tokens contrast clearly with $VAR_BG_PRIMARY.
-Visual Weight: Balance a large image in one quadrant with text in the opposite quadrant.
+Canvas background (design.background_preference): The canvas **never** carries a photo URL — only **color** (solid $VAR_BG_PRIMARY) or **gradient** (Tokens → CSS linear-gradient). Use **color** for a flat/matte base; use **gradient** for a smooth multi-stop look. For **image**, the canvas base is still solid **color** from $VAR_BG_PRIMARY (shows behind / letterboxing); the **photo** is always a **type:image** with role **BACKGROUND_IMAGE** (full rect, z_index 0) and a Pexels phrase in content_placeholder — also set **content.stockPhotoQueries.fullBleedBackground**. If you pick **image** but omit that element, the app may inject it from fullBleedBackground. When using **gradient** or plain **color** only, do **not** add BACKGROUND_IMAGE.
+$VAR_BG_PRIMARY / $VAR_BG_SECONDARY must stay cohesive for shapes, type, and the canvas fill that shows **behind** the BACKGROUND_IMAGE layer (e.g. matte or letterboxing).
+Visual Weight: Balance a large image in one quadrant with text in the opposite quadrant when applicable; hero + headline-only layouts are encouraged when elegant.
 
 Rule: Every element MUST include content_placeholder (string) and textZone (boolean, false when not over a photo). For text elements, content_placeholder must be the exact label to render (including CTA/action labels).
 JSON output: every element's style object SHOULD include these keys when possible (color, fontFamily, fontSize, fontWeight, alignment, opacity, letterSpacing, backgroundColor, fill, stroke, strokeWidth, cornerRadius, borderRadius). Use "" or 0 for fields that do not apply (images may use all-zero / empty; shapes use fill/cornerRadius; text uses typography fields).
@@ -230,20 +232,22 @@ TEXT CONSTRAINTS (required for every element where type is "text"):
 - overflowHandling: use SHRINK_TO_FIT for display/headline tiers when the renderer should scale; WRAP for paragraph-like copy; CLIP only when overflow must be hard-clipped.
 - For type "image" or "shape", set "constraints": null.
 
-BRAND & CONTACT:
-- brandName in "content" MUST be exactly "${APP_CONFIG.BRAND.DISPLAY_NAME}" (templates show this name).
+BRAND & CONTACT (canonical package fields — visibility in the layout is optional):
+- brandName in "content" MUST be exactly "${APP_CONFIG.BRAND.DISPLAY_NAME}".
 - email in "content" MUST be exactly "${APP_CONFIG.BRAND.CONTACT_EMAIL}".
-- website in "content" MUST always be exactly "${APP_CONFIG.BRAND.WEBSITE_URL}" (canonical field only).
-- content.showBrandLogoImage (boolean): set **true** only if you add a LOGO **image** element to "elements"; otherwise **false**. Many designs should use **BRAND_NAME** text only and **no** LOGO image — do not default to including a logo mark.
-- content.showWebsiteOnLayout (boolean): set **true** only if the visible design should show the URL (then use WEBSITE or {{website}} in that text element’s content_placeholder, or a short “Visit us” line). If **false**, do **not** place the URL or konvrtai.com in any visible copy.
-- design.logoText should be "${APP_CONFIG.BRAND.DISPLAY_NAME}" or a short uppercase variant of it (for metadata; optional on canvas unless you use a logo slot).
+- website in "content" MUST always be exactly "${APP_CONFIG.BRAND.WEBSITE_URL}".
+- Add **BRAND_NAME** text, **LOGO** image, address lines, **PHONE_NUMBER**, or **CTA** in "elements" only when the layout benefits—minimal promos may be headline + product + CTA only.
+- content.showBrandLogoImage (boolean): **true** only if you include a LOGO **image** element; otherwise **false**.
+- content.showWebsiteOnLayout (boolean): **true** only if the URL appears in the design; if **false**, no visible URL.
+- design.logoText: "${APP_CONFIG.BRAND.DISPLAY_NAME}" or short uppercase variant for metadata.
 
-IMAGERY — YOU CHOOSE THE COUNT (0+), NO FULL-BLEED CANVAS PHOTO:
-- The exported template **never** includes a full-canvas background photo. Canvas fill is **solid color only** via the palette — do **not** add a DECORATIVE shape that covers ~the entire canvas (no full-bleed “frame” rectangles); use smaller shapes, bands, or cards only. Do **not** add any element with role BACKGROUND_IMAGE (omit entirely).
-- Raster photos are only for **inset** roles: PRODUCT_IMAGE, PROMO_IMAGE_1 / _2 / _3, and optional LOGO (only when showBrandLogoImage is true). Zero photos is allowed (typography + shapes + color fields only).
-- For **each** non-LOGO image element, set content_placeholder to a **unique** short Pexels search phrase (no brand names). If you leave it empty, the app maps the role to optional content.stockPhotoQueries pools below.
-- For a LOGO image only when showBrandLogoImage is true: set content_placeholder to "LOGO"; the app injects the real asset.
-- Avoid duplicate LOGO image roles. You may use multiple PRODUCT_IMAGE or promo slots for grids.
+IMAGERY — SIMPLE, 0+ RASTERS:
+- Full-bleed photo = **BACKGROUND_IMAGE** element only (never a canvas background URL). Use background_preference **image** + fullBleedBackground phrase + one BACKGROUND_IMAGE row (or rely on synthesis + phrase). No redundant full-canvas DECORATIVE shape for the same effect.
+- Inset photos: PRODUCT_IMAGE, PROMO_IMAGE_1 / _2 / _3, optional LOGO (if showBrandLogoImage). Typography-only or gradient/color-only layouts are valid.
+- For each non-LOGO raster element, content_placeholder should be a **distinct** short Pexels search phrase (or rely on stockPhotoQueries pools if empty).
+- LOGO image: content_placeholder "LOGO" when used.
+- Avoid duplicate LOGO roles. Multiple PRODUCT_IMAGE slots allowed when intentional (e.g. grid).
+- DECORATIVE shapes: prefer **bands, half-blocks, cards**, or corner accents — avoid a second full-canvas solid that only repeats the canvas fill.
 
 STOCK POOL (include every key in content.stockPhotoQueries; use distinct Pexels-style phrases or "" if unused):
 - content.stockPhotoQueries: fullBleedBackground, framedFocus, productDetail, promo1, promo2, promo3 — each a string (wide scene, hero, detail, three alternates). Empty string allowed for unused slots; keys must all be present.
@@ -259,6 +263,7 @@ Return ONLY a JSON object. No prose. Use a root-level "elements" array with elem
   },
   "design": {
     "name": "string",
+    "background_preference": "color|gradient|image",
     "color_palette": {
       "$VAR_BG_PRIMARY": "hex",
       "$VAR_BG_SECONDARY": "hex",
@@ -272,7 +277,7 @@ Return ONLY a JSON object. No prose. Use a root-level "elements" array with elem
       {
         "id": "ELEM-01",
         "type": "text|image|shape",
-        "role": "HEADLINE|SUBHEAD|BODY|LOGO|PRODUCT_IMAGE|DECORATIVE",
+        "role": "HEADLINE|SUBHEAD|BODY|LOGO|PRODUCT_IMAGE|BACKGROUND_IMAGE|DECORATIVE",
         "rect": {"x": number, "y": number, "w": number, "h": number},
         "z_index": number,
         "style": {
@@ -477,6 +482,13 @@ function truncate(v: string, max: number): string {
   return s.slice(0, Math.max(0, max - 3)).trimEnd() + '...';
 }
 
+function parseBackgroundPreference(designRaw: Record<string, unknown>): 'image' | 'color' | 'gradient' {
+  const raw = cleanText(designRaw.backgroundPreference ?? designRaw.background_preference).toLowerCase();
+  if (raw === 'image' || raw === 'photo' || raw === 'picture') return 'image';
+  if (raw === 'gradient' || raw === 'linear_gradient') return 'gradient';
+  return 'color';
+}
+
 function normalizeSkeletonWithContent(
   raw: Record<string, unknown>,
   niche: string,
@@ -485,6 +497,7 @@ function normalizeSkeletonWithContent(
   height: number
 ): LlmSkeletonWithContent {
   const designObj = ((raw.design as unknown) ?? {}) as Record<string, unknown>;
+  let backgroundPreference = parseBackgroundPreference(designObj);
   const rawElements = Array.isArray(raw.elements)
     ? raw.elements
     : Array.isArray(designObj.elements)
@@ -592,9 +605,14 @@ function normalizeSkeletonWithContent(
     })
     .filter((e): e is LlmSkeletonElement => {
       if (e == null) return false;
-      if (e.type === 'image' && e.role === 'BACKGROUND_IMAGE') return false;
+      if (backgroundPreference === 'gradient' && e.type === 'image' && e.role === 'BACKGROUND_IMAGE') return false;
       return true;
     });
+
+  const hasBackgroundImageLayer = elements.some((e) => e.type === 'image' && e.role === 'BACKGROUND_IMAGE');
+  if (hasBackgroundImageLayer && backgroundPreference === 'color') {
+    backgroundPreference = 'image';
+  }
 
   let content = normalizeContentPackage((raw.content as unknown) ?? raw, niche, category);
   const hasLogoImage = elements.some((e) => e.type === 'image' && e.role === 'LOGO');
@@ -611,7 +629,7 @@ function normalizeSkeletonWithContent(
   if (hasLogoImage) content = { ...content, showBrandLogoImage: true };
   if (skeletonWantsWebsite) content = { ...content, showWebsiteOnLayout: true };
 
-  const designRaw = ((raw.design as unknown) ?? {}) as Record<string, unknown>;
+  const designRaw = designObj;
   const cpRaw = ((designRaw.colorPalette as unknown) ?? {}) as Record<string, unknown>;
   const cpRawAlt = ((designRaw.color_palette as unknown) ?? {}) as Record<string, unknown>;
   const fpRaw = ((designRaw.fontPairing as unknown) ?? {}) as Record<string, unknown>;
@@ -631,8 +649,7 @@ function normalizeSkeletonWithContent(
       body: cleanText(fpRaw.body) || 'Inter',
       accent: cleanText(fpRaw.accent) || undefined,
     },
-    // Pipeline does not emit full-bleed canvas images; keep metadata as color-first for downstream.
-    backgroundPreference: 'color',
+    backgroundPreference,
     logoText: cleanText(designRaw.logoText) || APP_CONFIG.BRAND.DISPLAY_NAME,
   };
   return {
