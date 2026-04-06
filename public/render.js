@@ -4,10 +4,61 @@
  */
 
 (function (global) {
+  /** Accept strict snake_case wire format (z_index, font_size, …) alongside legacy camelCase. */
+  function normalizeTemplateForDraw(template) {
+    if (!template || typeof template !== 'object') return template;
+    var c = template.canvas || {};
+    var palette = c.colorPalette || c.color_palette || {};
+    function normStyle(st) {
+      if (!st || typeof st !== 'object') return st || {};
+      return {
+        color: st.color,
+        fill: st.fill,
+        stroke: st.stroke,
+        backgroundColor: st.backgroundColor != null ? st.backgroundColor : st.background_color,
+        opacity: st.opacity,
+        fontFamily: st.fontFamily || st.font_family,
+        fontSize: st.fontSize != null ? st.fontSize : st.font_size,
+        fontWeight: st.fontWeight != null ? st.fontWeight : st.font_weight,
+        alignment: st.alignment,
+        letterSpacing: st.letterSpacing != null ? st.letterSpacing : st.letter_spacing,
+        strokeWidth: st.strokeWidth != null ? st.strokeWidth : st.stroke_width,
+        cornerRadius: st.cornerRadius != null ? st.cornerRadius : st.corner_radius,
+        borderRadius: st.borderRadius != null ? st.borderRadius : st.border_radius,
+      };
+    }
+    var normEls = (template.elements || []).map(function (el) {
+      var imgSrc =
+        el.type === 'image'
+          ? (el.content != null && el.content !== '' ? el.content : el.assetReferenceId || el.asset_reference_id || '')
+          : el.content;
+      return {
+        type: el.type,
+        role: el.role,
+        position: el.position,
+        dimensions: el.dimensions,
+        elementId: el.elementId || el.element_id,
+        zIndex: el.zIndex != null && el.zIndex !== undefined ? el.zIndex : el.z_index,
+        style: normStyle(el.style),
+        content: imgSrc,
+      };
+    });
+    return {
+      canvas: {
+        width: c.width,
+        height: c.height,
+        colorPalette: palette,
+        background: c.background,
+      },
+      elements: normEls,
+    };
+  }
+
   function drawTemplate(template, canvas) {
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
+    template = normalizeTemplateForDraw(template);
     const c = template.canvas || {};
     const w = Math.max(1, Math.round(c.width || 1080));
     const h = Math.max(1, Math.round(c.height || 1350));
@@ -22,7 +73,11 @@
     ctx.fillStyle = bgColor;
     ctx.fillRect(0, 0, w, h);
 
-    const elements = (template.elements || []).slice().sort(function (a, b) { return (a.zIndex || 0) - (b.zIndex || 0); });
+    const elements = (template.elements || []).slice().sort(function (a, b) {
+      var za = a.zIndex != null ? a.zIndex : a.z_index;
+      var zb = b.zIndex != null ? b.zIndex : b.z_index;
+      return (za || 0) - (zb || 0);
+    });
 
     function resolveColorToken(value, fallback) {
       if (!value) return fallback;
@@ -193,8 +248,10 @@
     }
 
     elements.forEach(function (el) {
-      if (el.type !== 'image' || !el.content) return;
-      const key = el.elementId || el.element_id || el.content || '';
+      if (el.type !== 'image') return;
+      var src = el.content || '';
+      if (!src) return;
+      const key = el.elementId || el.element_id || src || '';
       const img = new Image();
       img.crossOrigin = 'anonymous';
       imageState.set(key, { status: 'loading', img: null });
@@ -206,7 +263,7 @@
         imageState.set(key, { status: 'error', img: null });
         renderAll();
       };
-      img.src = el.content;
+      img.src = src;
     });
 
     renderAll();

@@ -16,25 +16,13 @@ import type {
 import { resolveTemplateTaxonomy, buildTemplateIndexTags } from '../config/templateTaxonomy.js';
 import type { ResolvedTemplateTaxonomy } from '../config/templateTaxonomy.js';
 import type { ContentPackage } from '../types/schema.js';
-import {
-  generateContentPackages,
-  generateSkeletonAndContentPackage,
-  finalizeTextElementConstraints,
-} from './contentExpansion.js';
-import {
-  getContentForRole,
-  getCanvasBackgroundStockQuery,
-  getStockPhotoQueryForRole,
-} from './semanticFitting.js';
+import { generateSkeletonAndContentPackage, finalizeTextElementConstraints } from './contentExpansion.js';
+import { getContentForRole, getStockPhotoQueryForRole } from './semanticFitting.js';
 import { searchPhotoDeduped, getImageUrl } from './imageService.js';
-import {
-  getDominantColor,
-  getAccentFromPrimary,
-  LIGHT_TEXT,
-  DARK_TEXT,
-} from './colorExtraction.js';
+import { LIGHT_TEXT, DARK_TEXT } from './colorExtraction.js';
 import { randomUUID } from 'crypto';
 import { APP_CONFIG } from '../config/constants.js';
+import { sortElementsForMainApp } from './strictTemplateJson.js';
 interface RuntimeSkeleton {
   id: string;
   name: string;
@@ -53,7 +41,18 @@ interface RuntimeSkeleton {
   }>;
 }
 
+/** Remove canonical brand URL from visible copy when the layout should not show a website line. */
+function stripCanonicalWebsiteFromVisibleText(text: string): string {
+  let s = String(text);
+  const url = APP_CONFIG.BRAND.WEBSITE_URL;
+  if (url) s = s.split(url).join('');
+  s = s.replace(/\bkonvrtai\.com\b/gi, '');
+  s = s.replace(/\s*\|\s*$/g, '').replace(/^\s*\|\s*/g, '');
+  return s.replace(/\s{2,}/g, ' ').trim();
+}
+
 function replaceTemplateTokens(text: string, pkg: ContentPackage): string {
+  const siteValue = pkg.showWebsiteOnLayout ? pkg.website : '';
   const trimmed = String(text ?? '').trim();
   const noDollar = trimmed.startsWith('$') ? trimmed.slice(1) : trimmed;
 
@@ -74,7 +73,7 @@ function replaceTemplateTokens(text: string, pkg: ContentPackage): string {
   if (noDollar.toUpperCase() === 'ADDRESS' || noDollar === 'address') return pkg.address;
   if (noDollar.toUpperCase() === 'LOGO_TEXT') return pkg.brandName;
   if (noDollar.toUpperCase() === 'HOURS') return 'Mon-Fri: 11 AM - 10 PM';
-  if (noDollar.toUpperCase() === 'WEBSITE') return pkg.email;
+  if (noDollar.toUpperCase() === 'WEBSITE' || noDollar === 'website') return siteValue;
 
   // Handle templating-style placeholders.
   return trimmed.replace(/\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/g, (_m, key: string) => {
@@ -90,6 +89,8 @@ function replaceTemplateTokens(text: string, pkg: ContentPackage): string {
         return pkg.phone;
       case 'email':
         return pkg.email;
+      case 'website':
+        return siteValue;
       case 'address':
         return pkg.address;
       case 'name':
@@ -206,26 +207,15 @@ export async function generateVariationsStream(
       skeleton = simplifySkeletonForElegance(skeleton);
       pkg = llm.content;
       llmDesign = llm.design;
-    } catch {
-      // Safe fallback if model output is malformed.
-      const skeletonFallback = createDynamicSkeleton({
-        width: canvasW,
-        height: canvasH,
-        platform,
-        seed: i + 1,
-        layoutIndex: i,
-      });
-      skeleton = simplifySkeletonForElegance(skeletonFallback);
-      const structureGoal = buildStructureGoal(marketing_goal, skeletonFallback);
-      const fallback = await generateContentPackages(
-        geminiKey,
-        niche,
-        category,
-        1,
-        structureGoal
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      console.error(
+        `[generateVariations] LLM skeleton+content failed for variation ${i + 1}/${count}: ${detail}`,
       );
-      pkg = fallback[0];
-      llmDesign = undefined;
+      throw new Error(
+        `LLM skeleton generation failed for variation ${i + 1}/${count}. Only live model output is used (no procedural fallback). ${detail}`,
+        { cause: err },
+      );
     }
 
     const template = await buildTemplateFromPackage(
@@ -239,7 +229,7 @@ export async function generateVariationsStream(
       { width: canvasW, height: canvasH, platform },
       llmDesign
     );
-    await onTemplate(template, i + 1, count);
+    await onTemplate({ ...template, skeleton_source: 'llm' }, i + 1, count);
   }
 }
 
@@ -276,7 +266,9 @@ function simplifySkeletonForElegance(skeleton: RuntimeSkeleton): RuntimeSkeleton
     'PHONE_NUMBER',
   ]);
   const textRolesSeen = new Set<ElementRole>();
-  /** Only one full-bleed layer and one brand mark; other image roles may repeat for mosaics. */
+  /** Only one full-bleed BACKGROUND_IMAGE in elements (canvas photo is merged at build time). */
+  let backgroundImageKept = false;
+  /** Only one brand mark; other image roles may repeat for mosaics. */
   const primaryImageRolesSeen = new Set<ElementRole>();
   let decorativeCount = 0;
 
@@ -298,7 +290,11 @@ function simplifySkeletonForElegance(skeleton: RuntimeSkeleton): RuntimeSkeleton
       textRolesSeen.add(el.role);
     }
     if (el.type === 'image') {
-      if (el.role === 'LOGO' || el.role === 'BACKGROUND_IMAGE') {
+      if (el.role === 'BACKGROUND_IMAGE') {
+        if (backgroundImageKept) continue;
+        backgroundImageKept = true;
+      }
+      if (el.role === 'LOGO') {
         if (primaryImageRolesSeen.has(el.role)) continue;
         primaryImageRolesSeen.add(el.role);
       }
@@ -313,18 +309,6 @@ function simplifySkeletonForElegance(skeleton: RuntimeSkeleton): RuntimeSkeleton
     ...skeleton,
     elements: kept.length >= 4 ? kept : skeleton.elements.slice(0, 6),
   };
-}
-
-function buildStructureGoal(marketingGoal: string | undefined, skeleton: RuntimeSkeleton): string {
-  const textRoles = Array.from(new Set(skeleton.elements.filter((e) => e.type === 'text').map((e) => e.role)));
-  const imageSlots = skeleton.elements.filter((e) => e.type === 'image').length;
-  const shapeSlots = skeleton.elements.filter((e) => e.type === 'shape').length;
-  const base = marketingGoal ? `${marketingGoal}. ` : '';
-  return (
-    `${base}Layout structure for this specific variation: ` +
-    `text roles=[${textRoles.join(', ')}], imageSlots=${imageSlots}, shapeSlots=${shapeSlots}. ` +
-    `Generate copy that fits this exact structure with strong visual hierarchy and non-empty field values.`
-  );
 }
 
 function getCanvasForPlatform(platform: NonNullable<GenerateVariationsInput['target_platform']>): { width: number; height: number } {
@@ -408,34 +392,6 @@ async function buildTemplateFromPackage(
     return '';
   };
 
-  let canvasBgUrl = '';
-  if (llmDesign?.backgroundPreference !== 'color') {
-    canvasBgUrl = await fetchDistinctPhotoUrl(getCanvasBackgroundStockQuery(pkg));
-    if (canvasBgUrl && !llmDesign && !primaryHex) {
-      try {
-        const dominant = await getDominantColor(canvasBgUrl);
-        bgPrimaryHex = dominant.hex;
-        bgSecondaryHex = getAccentFromPrimary(dominant.hex);
-        primaryHex = dominant.isDark ? '#FFFFFF' : '#111827';
-        accentHex = accentHex ?? (dominant.isDark ? '#FF6B6B' : '#FF6B6B');
-        textMainHex = dominant.isDark ? LIGHT_TEXT : DARK_TEXT;
-        textSecondaryHex = dominant.isDark ? '#FFD93D' : '#1A1A1A';
-      } catch {
-        bgPrimaryHex = '#1A1A2E';
-        bgSecondaryHex = '#16213E';
-        primaryHex = primaryHex ?? '#FFFFFF';
-        accentHex = accentHex ?? '#FF6B6B';
-        textMainHex = LIGHT_TEXT;
-        textSecondaryHex = '#FFD93D';
-      }
-    }
-  }
-
-  if (!canvasBgUrl && llmDesign?.backgroundPreference !== 'color') {
-    const fallbackQuery = `${taxonomy.subCategoryLabel || taxonomy.categoryLabel} ${pkg.name || ''}`.trim();
-    canvasBgUrl = await fetchDistinctPhotoUrl(fallbackQuery);
-  }
-
   if (!primaryHex) primaryHex = '#FFFFFF';
   if (!accentHex) accentHex = '#FF6B6B';
 
@@ -449,15 +405,36 @@ async function buildTemplateFromPackage(
     $VAR_TEXT_SECONDARY: llmDesign?.colorPalette.$VAR_TEXT_SECONDARY ?? textSecondaryHex,
   };
 
+  const bgPref = llmDesign?.backgroundPreference ?? 'color';
+  // Canvas is only solid color or gradient (LLM palette). Full-bleed photos are BACKGROUND_IMAGE elements.
+  const canvasBackground: NonNullable<Canvas['background']> =
+    bgPref === 'gradient'
+      ? {
+          type: 'gradient',
+          value: `linear-gradient(135deg, ${colorPalette.$VAR_BG_PRIMARY} 0%, ${colorPalette.$VAR_BG_SECONDARY} 100%)`,
+        }
+      : { type: 'color', value: colorPalette.$VAR_BG_PRIMARY ?? bgPrimaryHex };
+
+  const hasBgImageLayer = skeleton.elements.some((e) => e.type === 'image' && e.role === 'BACKGROUND_IMAGE');
+  const needsInjectedBg = bgPref === 'image' && !hasBgImageLayer;
+  const injectedFullBleed: RuntimeSkeleton['elements'][number] = {
+    element_id: 'full-bleed-bg',
+    type: 'image',
+    role: 'BACKGROUND_IMAGE',
+    position: { x: 0, y: 0 },
+    dimensions: { w: baseW, h: baseH },
+    style: {},
+    zIndex: 0,
+    content: '',
+    textZone: false,
+  };
+  const sourceElements = needsInjectedBg ? [injectedFullBleed, ...skeleton.elements] : skeleton.elements;
+
   const canvas: Canvas = {
     width: target.width,
     height: target.height,
     unit: 'px',
-    background: llmDesign?.backgroundPreference === 'color'
-      ? { type: 'color', value: colorPalette.$VAR_BG_PRIMARY ?? bgPrimaryHex }
-      : canvasBgUrl
-      ? { type: 'image', value: canvasBgUrl }
-      : { type: 'color', value: bgPrimaryHex },
+    background: canvasBackground,
     colorPalette,
   };
 
@@ -467,7 +444,20 @@ async function buildTemplateFromPackage(
   /** Advances when resolving Pexels query from role + stockPhotoQueries (not from placeholder). */
   let stockImageSlot = 0;
 
-  for (const el of skeleton.elements) {
+  for (const el of sourceElements) {
+    if (el.type === 'shape' && el.role === 'DECORATIVE') {
+      const bw = skeleton.canvas.width;
+      const bh = skeleton.canvas.height;
+      const dw = Number(el.dimensions.w);
+      const dh = Number(el.dimensions.h);
+      if (bw > 0 && bh > 0 && dw >= bw * 0.85 && dh >= bh * 0.85) {
+        continue;
+      }
+    }
+    if (el.role === 'LOGO' && !pkg.showBrandLogoImage) {
+      continue;
+    }
+
     const contentSlot = el.role;
     if (!contentSlots.includes(contentSlot)) contentSlots.push(contentSlot);
 
@@ -494,6 +484,9 @@ async function buildTemplateFromPackage(
       if (content) {
         // If the LLM used template placeholders like {{headline}}, replace them with real values.
         content = replaceTemplateTokens(content, pkg);
+        if (!pkg.showWebsiteOnLayout) {
+          content = stripCanonicalWebsiteFromVisibleText(content);
+        }
       }
     } else if (el.type === 'image') {
       if (el.role === 'LOGO') {
@@ -524,12 +517,7 @@ async function buildTemplateFromPackage(
     }
 
     const style = { ...el.style } as Record<string, unknown>;
-    if (style.color === '$VAR_TEXT') (style as { color: string }).color = textMainHex;
-    if (style.color === '$VAR_TEXT_MAIN') (style as { color: string }).color = textMainHex;
-    if (style.color === '$VAR_TEXT_SECONDARY') (style as { color: string }).color = textSecondaryHex;
-    if (style.color === '$VAR_ACCENT') (style as { color: string }).color = colorPalette.$VAR_ACCENT ?? '#FFD93D';
-    if (style.fill === '$VAR_ACCENT') (style as { fill: string }).fill = colorPalette.$VAR_ACCENT ?? '#FFD93D';
-    if (style.backgroundColor === '$VAR_ACCENT') (style as { backgroundColor: string }).backgroundColor = accentHex;
+    resolvePaletteTokensInStyle(style, colorPalette, accentHex);
 
     const isHeadline = el.role === 'HEADLINE';
     const fontSize = isHeadline ? Math.max(48, (el.style.fontSize as number) ?? 48) : (el.style.fontSize as number);
@@ -555,7 +543,7 @@ async function buildTemplateFromPackage(
     const wantsOverlay =
       el.type === 'text' &&
       (el as unknown as { textZone?: boolean }).textZone &&
-      (Boolean(canvasBgUrl) || elements.some((e) => e.type === 'image')) &&
+      elements.some((e) => e.type === 'image') &&
       el.role !== 'CTA'; // CTA already uses accent background
 
     if (wantsOverlay) {
@@ -585,22 +573,33 @@ async function buildTemplateFromPackage(
       });
     }
 
+    const isFullBleedBg = el.type === 'image' && el.role === 'BACKGROUND_IMAGE';
+
     elements.push({
       elementId: `${templateId}-${el.element_id}`,
       type: el.type,
       role: el.role,
-      position: { x: el.position.x * sx, y: el.position.y * sy },
+      position: isFullBleedBg ? { x: 0, y: 0 } : { x: el.position.x * sx, y: el.position.y * sy },
       dimensions:
         el.role === 'LOGO'
-          ? { w: 240, h: 120 }
-          : { w: el.dimensions.w * sx, h: el.dimensions.h * sy },
+          ? {
+              w: APP_CONFIG.ASSETS.LOGO_TEMPLATE_WIDTH_PX,
+              h: APP_CONFIG.ASSETS.LOGO_TEMPLATE_HEIGHT_PX,
+            }
+          : isFullBleedBg
+            ? { w: canvas.width, h: canvas.height }
+            : { w: el.dimensions.w * sx, h: el.dimensions.h * sy },
       rotation: 0,
       style: scaleStyle(style as TemplateElement['style'], sFont),
       content,
       constraints: templateConstraints,
       assetReferenceId: '',
       crop: null,
-      zIndex: typeof el.zIndex === 'number' && Number.isFinite(el.zIndex) ? el.zIndex : z++,
+      zIndex: isFullBleedBg
+        ? 0
+        : typeof el.zIndex === 'number' && Number.isFinite(el.zIndex)
+          ? el.zIndex
+          : z++,
     });
   }
 
@@ -673,180 +672,70 @@ async function buildTemplateFromPackage(
     scope: matchScope,
     created_at: now,
     updated_at: now,
-    elements: stabilizeElements(elements.sort((a, b) => (a.zIndex ?? 0) - (b.zIndex ?? 0)), canvas),
+    elements: stabilizeElements(sortElementsForMainApp(normalizeStackingOrder(elements)), canvas),
   };
 }
 
-function createDynamicSkeleton(args: {
-  width: number;
-  height: number;
-  platform: NonNullable<GenerateVariationsInput['target_platform']>;
-  seed: number;
-  layoutIndex: number;
-}): RuntimeSkeleton {
-  const { width: W, height: H, seed, platform, layoutIndex } = args;
-  const familyCount = 5;
-  const variantCount = 6;
-  const normalized = ((layoutIndex % (familyCount * variantCount)) + (familyCount * variantCount)) % (familyCount * variantCount);
-  const mode = normalized % familyCount;
-  const variant = Math.floor(normalized / familyCount);
-  const r = mulberry32(seed * 997 + W + H + normalized * 131);
-  const m = Math.round(Math.min(W, H) * 0.06);
-  const gap = Math.round(Math.min(W, H) * 0.018);
+/**
+ * Map design-token strings on styles to real hex so downstream apps never see invalid keys like $VAR_BG.
+ */
+function resolvePaletteTokensInStyle(
+  style: Record<string, unknown>,
+  cp: Canvas['colorPalette'],
+  accentFallback: string,
+): void {
+  const bgP = cp.$VAR_BG_PRIMARY ?? '#0F172A';
+  const bgS = cp.$VAR_BG_SECONDARY ?? '#111827';
+  const primary = cp.$VAR_PRIMARY ?? '#FFFFFF';
+  const secondary = cp.$VAR_SECONDARY ?? '#FFFFFF';
+  const accent = cp.$VAR_ACCENT ?? accentFallback;
+  const textMain = cp.$VAR_TEXT_MAIN ?? '#111827';
+  const textSec = cp.$VAR_TEXT_SECONDARY ?? '#FFFFFF';
 
-  const base: RuntimeSkeleton = {
-    id: `runtime-${seed}-${mode}`,
-    name: `Runtime Layout ${mode + 1}`,
-    canvas: { width: W, height: H, colorPalette: {} },
-    elements: [],
+  const map: Record<string, string> = {
+    $VAR_BG: bgP,
+    $VAR_BG_PRIMARY: bgP,
+    $VAR_BG_SECONDARY: bgS,
+    $VAR_PRIMARY: primary,
+    $VAR_SECONDARY: secondary,
+    $VAR_ACCENT: accent,
+    $VAR_TEXT: textMain,
+    $VAR_TEXT_MAIN: textMain,
+    $VAR_TEXT_SECONDARY: textSec,
   };
 
-  if (mode === 0) {
-    // Hero image + bottom editorial band
-    base.elements.push(
-      { element_id: 'bg', type: 'image', role: 'BACKGROUND_IMAGE', position: { x: 0, y: 0 }, dimensions: { w: W, h: H }, style: {}, content: '' },
-      { element_id: 'band', type: 'shape', role: 'DECORATIVE', position: { x: m, y: Math.round(H * 0.62) }, dimensions: { w: W - 2 * m, h: Math.round(H * 0.3) }, style: { fill: 'rgba(0,0,0,0.58)', cornerRadius: 24 }, content: '', textZone: true },
-      { element_id: 'brand', type: 'text', role: 'BRAND_NAME', position: { x: m + 24, y: Math.round(H * 0.66) }, dimensions: { w: W - 2 * m - 48, h: 40 }, style: { color: '$VAR_ACCENT', fontFamily: 'Manrope, sans-serif', fontSize: 26, fontWeight: 700, alignment: 'left' }, content: '', textZone: true },
-      { element_id: 'title', type: 'text', role: 'MENU_TITLE', position: { x: m + 24, y: Math.round(H * 0.70) }, dimensions: { w: W - 2 * m - 48, h: 90 }, style: { color: '$VAR_TEXT_SECONDARY', fontFamily: 'Manrope, sans-serif', fontSize: 50, fontWeight: 700, alignment: 'left' }, content: '', textZone: true },
-      { element_id: 'desc', type: 'text', role: 'DESCRIPTION', position: { x: m + 24, y: Math.round(H * 0.78) }, dimensions: { w: W - 2 * m - 48, h: 90 }, style: { color: '$VAR_TEXT_SECONDARY', fontFamily: 'DM Sans, sans-serif', fontSize: 30, fontWeight: 500, alignment: 'left' }, content: '', textZone: true },
-    );
-    return applyLayoutVariant(base, variant, W, H, r);
+  for (const key of ['color', 'fill', 'stroke', 'backgroundColor'] as const) {
+    const v = style[key];
+    if (typeof v === 'string' && v in map) {
+      (style as Record<string, string>)[key] = map[v];
+    }
   }
-
-  if (mode === 1) {
-    // Left image / right copy split
-    const leftW = Math.round(W * 0.56);
-    base.elements.push(
-      { element_id: 'img', type: 'image', role: 'PRODUCT_IMAGE', position: { x: 0, y: 0 }, dimensions: { w: leftW, h: H }, style: {}, content: '' },
-      { element_id: 'panel', type: 'shape', role: 'DECORATIVE', position: { x: leftW - 2, y: 0 }, dimensions: { w: W - leftW + 2, h: H }, style: { fill: 'rgba(15,23,42,0.93)' }, content: '', textZone: true },
-      { element_id: 'brand', type: 'text', role: 'BRAND_NAME', position: { x: leftW + m / 2, y: m * 2 }, dimensions: { w: W - leftW - m, h: 40 }, style: { color: '$VAR_TEXT_SECONDARY', fontFamily: 'Manrope, sans-serif', fontSize: 24, fontWeight: 700, alignment: 'left' }, content: '', textZone: true },
-      { element_id: 'product', type: 'text', role: 'PRODUCT_NAME', position: { x: leftW + m / 2, y: m * 3.2 }, dimensions: { w: W - leftW - m, h: 140 }, style: { color: '$VAR_ACCENT', fontFamily: 'Fraunces, serif', fontSize: 74, fontWeight: 800, alignment: 'left' }, content: '', textZone: true },
-      { element_id: 'desc', type: 'text', role: 'DESCRIPTION', position: { x: leftW + m / 2, y: m * 6.1 }, dimensions: { w: W - leftW - m, h: 130 }, style: { color: '$VAR_TEXT_SECONDARY', fontFamily: 'DM Sans, sans-serif', fontSize: 28, fontWeight: 500, alignment: 'left' }, content: '', textZone: true },
-    );
-    return applyLayoutVariant(base, variant, W, H, r);
-  }
-
-  if (mode === 2) {
-    // Center poster type + framed image
-    const frameW = Math.round(W * 0.78);
-    const frameX = Math.round((W - frameW) / 2);
-    base.elements.push(
-      { element_id: 'bg', type: 'shape', role: 'DECORATIVE', position: { x: 0, y: 0 }, dimensions: { w: W, h: H }, style: { fill: '$VAR_BG_PRIMARY' }, content: '' },
-      { element_id: 'brand', type: 'text', role: 'BRAND_NAME', position: { x: m, y: m * 1.6 }, dimensions: { w: W - 2 * m, h: 40 }, style: { color: '$VAR_TEXT_SECONDARY', fontFamily: 'Manrope, sans-serif', fontSize: 24, fontWeight: 700, alignment: 'center' }, content: '', textZone: true },
-      { element_id: 'title', type: 'text', role: 'MENU_TITLE', position: { x: m, y: m * 2.5 }, dimensions: { w: W - 2 * m, h: 90 }, style: { color: '$VAR_TEXT_MAIN', fontFamily: 'Manrope, sans-serif', fontSize: 44, fontWeight: 700, alignment: 'center' }, content: '', textZone: true },
-      { element_id: 'img', type: 'image', role: 'PRODUCT_IMAGE', position: { x: frameX, y: Math.round(H * 0.25) }, dimensions: { w: frameW, h: Math.round(H * 0.5) }, style: {}, content: '' },
-      { element_id: 'product', type: 'text', role: 'PRODUCT_NAME', position: { x: m, y: Math.round(H * 0.78) }, dimensions: { w: W - 2 * m, h: 130 }, style: { color: '$VAR_ACCENT', fontFamily: 'Fraunces, serif', fontSize: 92, fontWeight: 800, alignment: 'center' }, content: '', textZone: true },
-    );
-    return applyLayoutVariant(base, variant, W, H, r);
-  }
-
-  if (mode === 3) {
-    // Triple image mosaic + footer copy
-    const topH = Math.round(H * 0.35);
-    const tileW = Math.round((W - 2 * m - 2 * gap) / 3);
-    base.elements.push(
-      { element_id: 'i1', type: 'image', role: 'PROMO_IMAGE_1', position: { x: m, y: m }, dimensions: { w: tileW, h: topH }, style: {}, content: '' },
-      { element_id: 'i2', type: 'image', role: 'PROMO_IMAGE_2', position: { x: m + tileW + gap, y: m }, dimensions: { w: tileW, h: topH }, style: {}, content: '' },
-      { element_id: 'i3', type: 'image', role: 'PROMO_IMAGE_3', position: { x: m + 2 * (tileW + gap), y: m }, dimensions: { w: tileW, h: topH }, style: {}, content: '' },
-      { element_id: 'hero', type: 'image', role: 'PRODUCT_IMAGE', position: { x: m, y: m + topH + gap }, dimensions: { w: W - 2 * m, h: Math.round(H * 0.34) }, style: {}, content: '' },
-      { element_id: 'foot', type: 'shape', role: 'DECORATIVE', position: { x: m, y: Math.round(H * 0.74) }, dimensions: { w: W - 2 * m, h: Math.round(H * 0.22) }, style: { fill: 'rgba(15,23,42,0.82)', cornerRadius: 20 }, content: '', textZone: true },
-      { element_id: 'headline', type: 'text', role: 'HEADLINE', position: { x: m + 20, y: Math.round(H * 0.77) }, dimensions: { w: W - 2 * m - 40, h: 90 }, style: { color: '$VAR_TEXT_SECONDARY', fontFamily: 'Fraunces, serif', fontSize: 56, fontWeight: 800, alignment: 'left' }, content: '', textZone: true },
-      { element_id: 'desc', type: 'text', role: 'DESCRIPTION', position: { x: m + 20, y: Math.round(H * 0.84) }, dimensions: { w: W - 2 * m - 40, h: 80 }, style: { color: '$VAR_TEXT_SECONDARY', fontFamily: 'DM Sans, sans-serif', fontSize: 28, fontWeight: 500, alignment: 'left' }, content: '', textZone: true },
-    );
-    return applyLayoutVariant(base, variant, W, H, r);
-  }
-
-  // mode === 4
-  // Clean minimal with big product type and offset image
-  const imgW = Math.round(W * 0.58);
-  base.elements.push(
-    { element_id: 'bg', type: 'shape', role: 'DECORATIVE', position: { x: 0, y: 0 }, dimensions: { w: W, h: H }, style: { fill: '$VAR_BG_PRIMARY' }, content: '' },
-    { element_id: 'accent', type: 'shape', role: 'DECORATIVE', position: { x: 0, y: Math.round(H * 0.58) }, dimensions: { w: W, h: Math.round(H * 0.42) }, style: { fill: 'rgba(255,217,61,0.11)' }, content: '' },
-    { element_id: 'img', type: 'image', role: 'PRODUCT_IMAGE', position: { x: W - imgW - m, y: Math.round(H * 0.12) }, dimensions: { w: imgW, h: Math.round(H * 0.56) }, style: {}, content: '' },
-    { element_id: 'brand', type: 'text', role: 'BRAND_NAME', position: { x: m, y: Math.round(H * 0.13) }, dimensions: { w: W - imgW - 2 * m, h: 40 }, style: { color: '$VAR_TEXT_SECONDARY', fontFamily: 'Manrope, sans-serif', fontSize: 24, fontWeight: 700, alignment: 'left' }, content: '', textZone: true },
-    { element_id: 'product', type: 'text', role: 'PRODUCT_NAME', position: { x: m, y: Math.round(H * 0.22) }, dimensions: { w: W - imgW - 2 * m, h: 220 }, style: { color: '$VAR_ACCENT', fontFamily: 'Fraunces, serif', fontSize: 102, fontWeight: 800, alignment: 'left' }, content: '', textZone: true },
-    { element_id: 'desc', type: 'text', role: 'DESCRIPTION', position: { x: m, y: Math.round(H * 0.48) }, dimensions: { w: W - imgW - 2 * m, h: 120 }, style: { color: '$VAR_TEXT_SECONDARY', fontFamily: 'DM Sans, sans-serif', fontSize: 30, fontWeight: 500, alignment: 'left' }, content: '', textZone: true },
-  );
-  return applyLayoutVariant(base, variant, W, H, r);
 }
 
-function mulberry32(a: number): () => number {
-  return function () {
-    let t = (a += 0x6d2b79f5);
-    t = Math.imul(t ^ (t >>> 15), t | 1);
-    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+/**
+ * - Assign unique zIndex 0..n-1 (higher = on top for z-index–aware renderers).
+ * - Emit array in paint order for **array-order** renderers (first item = bottom): all non-text
+ *   layers first (sorted by z then build order), then all text (same). Decorative bars/shapes
+ *   no longer appear after copy in the list.
+ */
+function normalizeStackingOrder(elements: TemplateElement[]): TemplateElement[] {
+  const tagged = elements.map((el, stackIndex) => ({ el, stackIndex }));
+  const isText = (t: (typeof tagged)[number]) => t.el.type === 'text';
+  const nonText = tagged.filter((t) => !isText(t));
+  const text = tagged.filter(isText);
+  const byZThenOrder = (a: (typeof tagged)[number], b: (typeof tagged)[number]) => {
+    const za = a.el.zIndex ?? 0;
+    const zb = b.el.zIndex ?? 0;
+    if (za !== zb) return za - zb;
+    return a.stackIndex - b.stackIndex;
   };
-}
-
-function buildUniqueLayoutPlan(count: number, seedKey: string): number[] {
-  const total = 30; // 5 families x 6 variants
-  const pool = Array.from({ length: total }, (_, i) => i);
-  const rand = mulberry32(hashString(seedKey));
-  for (let i = pool.length - 1; i > 0; i--) {
-    const j = Math.floor(rand() * (i + 1));
-    const tmp = pool[i];
-    pool[i] = pool[j];
-    pool[j] = tmp;
-  }
-  if (count <= total) return pool.slice(0, count);
-  const out: number[] = [];
-  for (let i = 0; i < count; i++) out.push(pool[i % total]);
-  return out;
-}
-
-function hashString(s: string): number {
-  let h = 2166136261;
-  for (let i = 0; i < s.length; i++) {
-    h ^= s.charCodeAt(i);
-    h = Math.imul(h, 16777619);
-  }
-  return h >>> 0;
-}
-
-function applyLayoutVariant(base: RuntimeSkeleton, variant: number, W: number, H: number, rand: () => number): RuntimeSkeleton {
-  if (variant === 0) return base;
-  const e = base.elements.map((x) => ({ ...x, position: { ...x.position }, dimensions: { ...x.dimensions }, style: { ...x.style } }));
-  const textEls = e.filter((x) => x.type === 'text');
-  const shapeEls = e.filter((x) => x.type === 'shape');
-  const imageEls = e.filter((x) => x.type === 'image');
-
-  if (variant === 1) {
-    // Horizontal mirror
-    for (const el of e) el.position.x = W - el.position.x - el.dimensions.w;
-    for (const t of textEls) if ((t.style as any).alignment === 'left') (t.style as any).alignment = 'right';
-  } else if (variant === 2) {
-    // Vertical rhythm shift
-    const dy = Math.round(H * 0.04);
-    for (let i = 0; i < textEls.length; i++) textEls[i].position.y += i % 2 === 0 ? -dy : dy;
-  } else if (variant === 3) {
-    // Centered editorial variant
-    for (const t of textEls) {
-      (t.style as any).alignment = 'center';
-      t.position.x = Math.max(24, Math.round(W * 0.08));
-      t.dimensions.w = Math.round(W * 0.84);
-    }
-  } else if (variant === 4) {
-    // Inset image blocks + rounder cards
-    const inset = Math.round(Math.min(W, H) * 0.03);
-    for (const im of imageEls) {
-      im.position.x += inset;
-      im.position.y += inset;
-      im.dimensions.w = Math.max(120, im.dimensions.w - inset * 2);
-      im.dimensions.h = Math.max(120, im.dimensions.h - inset * 2);
-    }
-    for (const sh of shapeEls) {
-      (sh.style as any).cornerRadius = Math.max(12, Number((sh.style as any).cornerRadius || 0) + 12);
-    }
-  } else if (variant === 5) {
-    // Subtle asymmetry
-    const dx = Math.round(W * (0.02 + rand() * 0.025));
-    for (let i = 0; i < textEls.length; i++) {
-      textEls[i].position.x += i % 2 === 0 ? dx : -dx;
-    }
-  }
-
-  return { ...base, elements: e };
+  nonText.sort(byZThenOrder);
+  text.sort(byZThenOrder);
+  const merged = [...nonText, ...text];
+  merged.forEach((t, rank) => {
+    t.el.zIndex = rank;
+  });
+  return merged.map((t) => t.el);
 }
 
 function scaleStyle(style: TemplateElement['style'], sFont: number): TemplateElement['style'] {
@@ -862,6 +751,15 @@ function stabilizeElements(elements: TemplateElement[], canvas: Canvas): Templat
   const minSide = Math.min(canvas.width, canvas.height);
   const pad = Math.round(minSide * 0.02);
   return elements.map((el) => {
+    if (el.type === 'image' && el.role === 'BACKGROUND_IMAGE') {
+      return {
+        ...el,
+        position: { x: 0, y: 0 },
+        dimensions: { w: canvas.width, h: canvas.height },
+        style: { ...(el.style || {}) },
+      };
+    }
+
     const out = {
       ...el,
       position: { ...el.position },

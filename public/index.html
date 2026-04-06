@@ -343,6 +343,89 @@
       white-space: pre;
       tab-size: 2;
     }
+    .modal-panel--dev {
+      width: min(640px, 100%);
+      max-height: min(85vh, 880px);
+    }
+    .dev-post-body {
+      display: flex;
+      flex-direction: column;
+      gap: 0.75rem;
+    }
+    .dev-post-section {
+      margin: 0;
+    }
+    .dev-post-section-title {
+      font-size: 0.75rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--muted);
+      margin: 0 0 0.35rem 0;
+    }
+    .dev-post-pre {
+      max-height: 120px;
+      overflow: auto;
+      margin: 0;
+      padding: 0.65rem 0.75rem;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: #0b0b0e;
+    }
+    .dev-post-pre--tall {
+      max-height: 220px;
+    }
+    .dev-post-progress {
+      font-size: 0.8125rem;
+      color: var(--accent);
+      font-weight: 600;
+    }
+    .dev-post-progress[hidden] {
+      display: none !important;
+    }
+    .dev-post-hint {
+      font-size: 0.75rem;
+      color: var(--muted);
+      margin: 0;
+    }
+    .dev-post-token {
+      display: flex;
+      flex-direction: column;
+      gap: 0.35rem;
+    }
+    .dev-post-token label {
+      font-size: 0.75rem;
+      font-weight: 600;
+      color: var(--muted);
+    }
+    .dev-post-token input {
+      width: 100%;
+      padding: 0.5rem 0.65rem;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--bg);
+      color: var(--text);
+      font: 0.8rem ui-monospace, Menlo, Monaco, Consolas, monospace;
+    }
+    .dev-post-token input:focus {
+      outline: none;
+      border-color: var(--accent);
+    }
+    .dev-post-token-hint {
+      font-size: 0.7rem;
+      color: var(--muted);
+      margin: 0;
+    }
+    .dev-post-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+      align-items: center;
+      margin-top: 0.25rem;
+    }
+    .dev-post-actions button[hidden] {
+      display: none !important;
+    }
 
     .tester {
       display: none;
@@ -524,6 +607,49 @@
       </div>
       <div class="modal-body">
         <pre id="jsonModalPre" class="json"></pre>
+      </div>
+    </div>
+  </div>
+
+  <div id="devPostModal" class="modal" role="dialog" aria-modal="true" aria-labelledby="devPostModalTitle">
+    <div class="modal-panel modal-panel--dev">
+      <div class="modal-header">
+        <h2 id="devPostModalTitle" class="modal-title">Post template to Dev</h2>
+        <div class="modal-actions">
+          <button id="devPostHeaderCloseBtn" type="button" class="btn-secondary">Close</button>
+        </div>
+      </div>
+      <div class="modal-body dev-post-body">
+        <p id="devPostProgress" class="dev-post-progress" hidden>Sending request…</p>
+        <section class="dev-post-section" aria-label="Request summary">
+          <h3 class="dev-post-section-title">Request</h3>
+          <pre id="devPostRequestPre" class="json dev-post-pre"></pre>
+        </section>
+        <section class="dev-post-section" aria-label="Mapped JSON body">
+          <h3 class="dev-post-section-title">Mapped body</h3>
+          <pre id="devPostBodyPre" class="json dev-post-pre dev-post-pre--tall"></pre>
+        </section>
+        <p id="devPostHint" class="dev-post-hint" hidden></p>
+        <div class="dev-post-token">
+          <label for="devPostTokenInput">Bearer token (optional)</label>
+          <input
+            id="devPostTokenInput"
+            type="password"
+            name="devPostToken"
+            autocomplete="off"
+            spellcheck="false"
+            placeholder="Paste JWT to override server .env; leave empty to use UPLOAD_TEMPLATE_BEARER_TOKEN"
+          />
+          <p class="dev-post-token-hint">Server sends Authorization: Bearer &lt;token&gt;. You may paste the raw JWT or a full &quot;Bearer …&quot; string.</p>
+        </div>
+        <div class="dev-post-actions">
+          <button id="devPostSendBtn" type="button">Post</button>
+          <button id="devPostDoneCloseBtn" type="button" class="btn-secondary" hidden>Close</button>
+        </div>
+        <section id="devPostResponseSection" class="dev-post-section" hidden aria-label="Server response">
+          <h3 class="dev-post-section-title">Server response</h3>
+          <pre id="devPostResponsePre" class="json dev-post-pre dev-post-pre--tall"></pre>
+        </section>
       </div>
     </div>
   </div>

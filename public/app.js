@@ -90,6 +90,19 @@
   var closeJsonBtn = document.getElementById('closeJsonBtn');
   var copyJsonBtn = document.getElementById('copyJsonBtn');
 
+  var devPostModal = document.getElementById('devPostModal');
+  var devPostRequestPre = document.getElementById('devPostRequestPre');
+  var devPostBodyPre = document.getElementById('devPostBodyPre');
+  var devPostResponseSection = document.getElementById('devPostResponseSection');
+  var devPostResponsePre = document.getElementById('devPostResponsePre');
+  var devPostSendBtn = document.getElementById('devPostSendBtn');
+  var devPostProgress = document.getElementById('devPostProgress');
+  var devPostHint = document.getElementById('devPostHint');
+  var devPostHeaderCloseBtn = document.getElementById('devPostHeaderCloseBtn');
+  var devPostDoneCloseBtn = document.getElementById('devPostDoneCloseBtn');
+  var devPostTokenInput = document.getElementById('devPostTokenInput');
+
+  var pendingDevPostTemplate = null;
   var activeJsonText = '';
   var originalSubmitText = submitBtn ? submitBtn.textContent : 'Generate';
 
@@ -229,6 +242,15 @@
     });
     actions.appendChild(testBtn);
 
+    var postDevBtn = document.createElement('button');
+    postDevBtn.type = 'button';
+    postDevBtn.className = 'btn-secondary';
+    postDevBtn.textContent = 'Post to Dev';
+    postDevBtn.addEventListener('click', function () {
+      openDevPostModal(t);
+    });
+    actions.appendChild(postDevBtn);
+
     var wrap = document.createElement('div');
     wrap.className = 'preview-wrap';
     var cw = (t && t.canvas && t.canvas.width) ? Number(t.canvas.width) : 1080;
@@ -355,13 +377,172 @@
     jsonModalPre.textContent = '';
   }
 
+  function closeDevPostModal() {
+    if (!devPostModal) return;
+    devPostModal.classList.remove('open');
+    pendingDevPostTemplate = null;
+    if (devPostProgress) devPostProgress.hidden = true;
+    if (devPostResponseSection) devPostResponseSection.hidden = true;
+    if (devPostResponsePre) devPostResponsePre.textContent = '';
+    if (devPostSendBtn) {
+      devPostSendBtn.disabled = false;
+      devPostSendBtn.hidden = false;
+    }
+    if (devPostDoneCloseBtn) devPostDoneCloseBtn.hidden = true;
+    if (devPostHint) {
+      devPostHint.hidden = true;
+      devPostHint.textContent = '';
+    }
+  }
+
+  function openDevPostModal(t) {
+    if (!devPostModal || !devPostRequestPre || !devPostBodyPre) return;
+    pendingDevPostTemplate = t;
+    if (devPostResponseSection) devPostResponseSection.hidden = true;
+    if (devPostResponsePre) devPostResponsePre.textContent = '';
+    if (devPostProgress) devPostProgress.hidden = true;
+    if (devPostSendBtn) {
+      devPostSendBtn.disabled = false;
+      devPostSendBtn.hidden = false;
+    }
+    if (devPostDoneCloseBtn) devPostDoneCloseBtn.hidden = true;
+    if (devPostHint) {
+      devPostHint.hidden = true;
+      devPostHint.textContent = '';
+    }
+    devPostRequestPre.textContent = 'Loading…';
+    devPostBodyPre.textContent = '';
+    devPostModal.classList.add('open');
+
+    fetch('/api/dev/templates/map', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ template: t }),
+    })
+      .then(function (res) {
+        return res.json().then(function (body) {
+          return { ok: res.ok, body: body };
+        });
+      })
+      .then(function (_ref) {
+        var ok = _ref.ok;
+        var body = _ref.body;
+        if (!ok) {
+          devPostRequestPre.textContent = (body && body.error) ? body.error : 'Map request failed.';
+          devPostBodyPre.textContent = '';
+          return;
+        }
+        devPostRequestPre.textContent = body.requestSummary || '';
+        try {
+          devPostBodyPre.textContent = JSON.stringify(body.mapped, null, 2);
+        } catch (e) {
+          devPostBodyPre.textContent = String(body.mapped);
+        }
+        if (devPostHint && body.publishConfigured === false) {
+          devPostHint.hidden = false;
+          devPostHint.textContent =
+            'No default token in .env — paste a JWT above to authorize, or set UPLOAD_TEMPLATE_BEARER_TOKEN on the server.';
+        }
+      })
+      .catch(function (err) {
+        devPostRequestPre.textContent =
+          'Network error: ' + (err && err.message ? err.message : String(err));
+        devPostBodyPre.textContent = '';
+      });
+  }
+
+  function runDevPostPublish() {
+    if (!pendingDevPostTemplate || !devPostSendBtn) return;
+    devPostSendBtn.disabled = true;
+    if (devPostProgress) {
+      devPostProgress.hidden = false;
+      devPostProgress.textContent = 'Posting to Dev API…';
+    }
+    if (devPostResponseSection) devPostResponseSection.hidden = true;
+    if (devPostResponsePre) devPostResponsePre.textContent = '';
+
+    var publishBody = { template: pendingDevPostTemplate };
+    var tok = (devPostTokenInput && devPostTokenInput.value) ? devPostTokenInput.value.trim() : '';
+    if (tok) publishBody.bearerToken = tok;
+
+    fetch('/api/dev/templates/publish', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(publishBody),
+    })
+      .then(function (res) {
+        return res.json().then(function (body) {
+          return { res: res, body: body };
+        });
+      })
+      .then(function (_ref2) {
+        var res = _ref2.res;
+        var body = _ref2.body;
+        if (devPostProgress) devPostProgress.hidden = true;
+        if (!devPostResponseSection || !devPostResponsePre) return;
+
+        if (res.status === 503 && body && body.error) {
+          devPostResponseSection.hidden = false;
+          devPostResponsePre.textContent = JSON.stringify(body, null, 2);
+        } else if (!res.ok && !(body && ('status' in body || 'ok' in body))) {
+          devPostResponseSection.hidden = false;
+          devPostResponsePre.textContent = JSON.stringify(body, null, 2);
+        } else {
+          devPostResponseSection.hidden = false;
+          var out = {
+            ok: body.ok,
+            httpStatus: body.status,
+            statusText: body.statusText,
+            responseBodyJson: body.responseBodyJson,
+            responseBodyText: body.responseBodyText,
+            error: body.error,
+          };
+          devPostResponsePre.textContent = JSON.stringify(out, null, 2);
+        }
+
+        var allowRetry = res.status === 503;
+        if (devPostSendBtn) {
+          devPostSendBtn.hidden = !allowRetry;
+          devPostSendBtn.disabled = false;
+        }
+        if (devPostDoneCloseBtn) devPostDoneCloseBtn.hidden = false;
+      })
+      .catch(function (err) {
+        if (devPostProgress) devPostProgress.hidden = true;
+        if (devPostResponseSection && devPostResponsePre) {
+          devPostResponseSection.hidden = false;
+          devPostResponsePre.textContent = JSON.stringify(
+            { ok: false, error: err && err.message ? err.message : String(err) },
+            null,
+            2,
+          );
+        }
+        if (devPostSendBtn) {
+          devPostSendBtn.hidden = false;
+          devPostSendBtn.disabled = false;
+        }
+        if (devPostDoneCloseBtn) devPostDoneCloseBtn.hidden = false;
+      });
+  }
+
   closeJsonBtn.addEventListener('click', closeJsonModal);
   jsonModal.addEventListener('click', function (e) {
     if (e.target === jsonModal) closeJsonModal();
   });
   document.addEventListener('keydown', function (e) {
-    if (e.key === 'Escape' && jsonModal.classList.contains('open')) closeJsonModal();
+    if (e.key !== 'Escape') return;
+    if (jsonModal.classList.contains('open')) closeJsonModal();
+    else if (devPostModal && devPostModal.classList.contains('open')) closeDevPostModal();
   });
+
+  if (devPostModal) {
+    devPostModal.addEventListener('click', function (e) {
+      if (e.target === devPostModal) closeDevPostModal();
+    });
+  }
+  if (devPostHeaderCloseBtn) devPostHeaderCloseBtn.addEventListener('click', closeDevPostModal);
+  if (devPostDoneCloseBtn) devPostDoneCloseBtn.addEventListener('click', closeDevPostModal);
+  if (devPostSendBtn) devPostSendBtn.addEventListener('click', runDevPostPublish);
   copyJsonBtn.addEventListener('click', function () {
     var text = activeJsonText || '';
     if (!text) return;
