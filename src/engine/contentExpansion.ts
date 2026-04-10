@@ -6,6 +6,78 @@ import { GoogleGenAI } from '@google/genai';
 import type { ContentPackage, ElementConstraints, StockPhotoQueries } from '../types/schema.js';
 import { APP_CONFIG } from '../config/constants.js';
 
+const GEMINI_RETRY_MAX = 6;
+const GEMINI_RETRY_BASE_MS = 4000;
+const GEMINI_RETRY_MAX_DELAY_MS = 60000;
+
+function stringifyGeminiError(err: unknown): string {
+  if (err instanceof Error) {
+    const any = err as Error & { cause?: unknown };
+    const cause = any.cause != null ? ` ${String(any.cause)}` : '';
+    return `${err.message}${cause}`;
+  }
+  try {
+    return JSON.stringify(err);
+  } catch {
+    return String(err);
+  }
+}
+
+function isRetryableGeminiError(msg: string): boolean {
+  const m = msg.toLowerCase();
+  return (
+    m.includes('503') ||
+    m.includes('unavailable') ||
+    m.includes('high demand') ||
+    m.includes('try again later') ||
+    m.includes('overloaded') ||
+    m.includes('econnreset') ||
+    m.includes('etimedout') ||
+    m.includes('socket hang up') ||
+    m.includes('429') ||
+    m.includes('resource_exhausted') ||
+    m.includes('quota')
+  );
+}
+
+async function sleep(ms: number): Promise<void> {
+  await new Promise((r) => setTimeout(r, ms));
+}
+
+type GenerateContentResult = Awaited<ReturnType<GoogleGenAI['models']['generateContent']>>;
+
+/**
+ * Retries on transient Gemini overload (503), rate limits, and flaky network.
+ * A new API key does not fix 503 "high demand" — that is Google's capacity; retries help.
+ */
+async function generateContentWithRetry(
+  ai: GoogleGenAI,
+  model: string,
+  contents: string,
+  logLabel: string,
+): Promise<GenerateContentResult> {
+  let lastErr: unknown;
+  for (let attempt = 0; attempt < GEMINI_RETRY_MAX; attempt++) {
+    try {
+      return await ai.models.generateContent({ model, contents });
+    } catch (err: unknown) {
+      lastErr = err;
+      const text = stringifyGeminiError(err);
+      if (!isRetryableGeminiError(text) || attempt === GEMINI_RETRY_MAX - 1) {
+        throw err;
+      }
+      const exp = Math.min(GEMINI_RETRY_MAX_DELAY_MS, GEMINI_RETRY_BASE_MS * 2 ** attempt);
+      const jitter = Math.floor(Math.random() * 1500);
+      const delay = exp + jitter;
+      console.warn(
+        `[gemini] ${logLabel} attempt ${attempt + 1}/${GEMINI_RETRY_MAX} failed (${text.slice(0, 180)}…); retry in ${Math.round(delay / 1000)}s`,
+      );
+      await sleep(delay);
+    }
+  }
+  throw lastErr;
+}
+
 export interface LlmSkeletonElement {
   element_id: string;
   type: 'text' | 'image' | 'shape';
@@ -132,33 +204,7 @@ Output ONLY a valid JSON array of ${count} objects, no markdown or explanation. 
   const model = APP_CONFIG.GEMINI_MODEL;
   console.log('\n[gemini] contentExpansion final prompt:\n' + prompt + '\n');
 
-  let response: Awaited<ReturnType<typeof ai.models.generateContent>>;
-  try {
-    response = await ai.models.generateContent({
-      model,
-      contents: prompt,
-    });
-  } catch (err: unknown) {
-    const msg = err && typeof err === 'object' && 'message' in err ? String((err as { message: unknown }).message) : '';
-    if (msg.includes('429') || msg.includes('RESOURCE_EXHAUSTED') || msg.includes('quota')) {
-      const retryDelay = 10000;
-      await new Promise((r) => setTimeout(r, retryDelay));
-      try {
-        response = await ai.models.generateContent({ model, contents: prompt });
-      } catch (retryErr: unknown) {
-        const retryMsg =
-          retryErr && typeof retryErr === 'object' && 'message' in retryErr
-            ? String((retryErr as { message: unknown }).message)
-            : '';
-        if (retryMsg.includes('429') || retryMsg.includes('RESOURCE_EXHAUSTED') || retryMsg.includes('quota')) {
-          throw new Error('Quota exceeded. ' + retryMsg);
-        }
-        throw retryErr;
-      }
-    } else {
-      throw err;
-    }
-  }
+  const response = await generateContentWithRetry(ai, model, prompt, 'contentPackages');
 
   const text = response.text ?? '';
   console.log('\n[gemini] contentExpansion llm response:\n' + text + '\n');
@@ -324,7 +370,7 @@ Return ONLY a JSON object. No prose. Put the skeleton in **root-level "elements"
   const ai = new GoogleGenAI({ apiKey });
   const model = APP_CONFIG.GEMINI_MODEL;
   console.log('\n[gemini] skeleton+content final prompt:\n' + prompt + '\n');
-  const response = await ai.models.generateContent({ model, contents: prompt });
+  const response = await generateContentWithRetry(ai, model, prompt, 'skeleton+content');
   const text = response.text ?? '';
   console.log('\n[gemini] skeleton+content llm response:\n' + text + '\n');
   const parsed = parseLlmJsonWithCandidates(text, 'object') as Record<string, unknown>;
